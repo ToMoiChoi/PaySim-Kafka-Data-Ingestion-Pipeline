@@ -1,0 +1,22 @@
+FROM python:3.10-slim
+
+# Install Java (required by PySpark)
+RUN apt-get update && \
+    apt-get install -y default-jre procps && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Py4J Bind Fix & Load Packages
+ENV SPARK_LOCAL_IP=127.0.0.1
+ENV PYSPARK_SUBMIT_ARGS="--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 pyspark-shell"
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+# Copy the application code
+COPY . .
+
+# Run the Spark application
+CMD ["python", "-u", "spark_processor.py"]
