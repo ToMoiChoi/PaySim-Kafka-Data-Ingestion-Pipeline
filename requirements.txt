@@ -3,3 +3,5 @@ kafka-python
 python-dotenv
 pyspark>=3.5.0
 kaggle
+google-cloud-bigquery>=3.0.0
+db-dtypes

@@ -39,3 +39,9 @@ services:
     environment:
       # Spark container in Docker network needs to talk to Kafka internal port
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      # BigQuery credentials (mount file bên dưới volumes)
+      GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/service-account.json
+    volumes:
+      # Mount thư mục chứa Service Account JSON vào container
+      # Thay đổi path bên trái cho phù hợp với máy bạn
+      - ./credentials:/app/credentials:ro

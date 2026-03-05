@@ -1,1 +1,6 @@
 data/
+venv/
+credentials/
+*.log
+__pycache__/
+.env

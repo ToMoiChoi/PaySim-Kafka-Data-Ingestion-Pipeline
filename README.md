@@ -1,121 +1,161 @@
 # PaySim Kafka Data Ingestion Pipeline
+**Graduation Thesis (KLTN) – Real-time Payment Transaction Processing & Reward Points System**
 
-Dự án này thực hiện việc đọc dữ liệu mô phỏng giao dịch tài chính từ bộ dataset [PaySim1](https://www.kaggle.com/datasets/ealaxi/paysim1), xử lý biến đổi dữ liệu, bơm lỗi (fault injection), và đẩy thẳng các luồng sự kiện vào Apache Kafka.
+This project implements a real-time data pipeline that ingests simulated financial transactions from the [PaySim1](https://www.kaggle.com/datasets/ealaxi/paysim1) dataset, processes them through Apache Kafka and Spark Structured Streaming with fault tolerance (watermark & deduplication), computes reward points, and lands clean data into a Google BigQuery Star Schema data warehouse.
 
-## Kiến trúc & Luồng xử lý
+## Architecture & Data Flow
 
-1. **Đọc dữ liệu:** `kafka_producer.py` đọc file `PS_2017...log.csv`.
-2. **Biến đổi dữ liệu:** Lọc ra các bản ghi có `type == "PAYMENT"`. Thêm trường `transaction_id` (UUID4) và `event_timestamp` (thời gian hiện tại chuẩn ISO-8601).
-3. **Bơm lỗi (Fault Injection):** Sao chép ngẫu nhiên 10% số lượng records (với cùng `transaction_id` để mô phỏng dữ liệu bị lặp do lỗi mạng/duplicate event) và trộn lại vào luồng dữ liệu chính.
-4. **Kafka Producer:** Bắn dữ liệu (dạng JSON) vào topic `payment_events` của Kafka chạy qua Docker Compose.
+```
+PaySim CSV → Kafka Producer → Kafka Topic → Spark Structured Streaming → BigQuery (Star Schema)
+```
 
-## Yêu cầu Hệ thống (Prerequisites)
+### Week 1: Data Ingestion (Kafka Producer)
+1. **Read Data:** `kafka_producer.py` reads the PaySim CSV file.
+2. **Transform:** Filters records with `type == "PAYMENT"`, adds `transaction_id` (UUID4) and `event_timestamp` (ISO-8601).
+3. **Fault Injection:** Duplicates 10% of records randomly (same `transaction_id`) to simulate network retries / duplicate events.
+4. **Produce to Kafka:** Streams JSON messages into the `payment_events` topic via Docker Compose.
+
+### Week 2: Spark Structured Streaming (Core Processing)
+1. **Kafka Consumer:** `spark_processor.py` reads real-time stream from topic `payment_events`.
+2. **Watermark & Deduplication:** Declares a 5-minute watermark + `dropDuplicates(["transaction_id"])` to eliminate the 10% injected duplicate transactions.
+3. **Reward Calculation:** Computes `reward_points = int(amount × 0.01)` for each valid transaction.
+4. **BigQuery Sink:** Writes clean data into `fact_transactions` on BigQuery using `foreachBatch`.
+
+### Week 3: Star Schema on BigQuery (Data Modeling)
+1. **`bigquery_schema.py`**: Creates the `paysim_dw` dataset and 6 Star Schema tables.
+2. **`seed_dimensions.py`**: Populates 5 Dimension tables with sample data.
+
+#### Star Schema ERD
+```
+dim_users ──────────┐
+dim_merchants ──────┤
+dim_transaction_type┼──── fact_transactions
+dim_location ───────┤
+dim_date ───────────┘
+```
+
+| Table | Type | Description |
+|-------|------|-------------|
+| `fact_transactions` | Fact | Transaction history & reward points (partitioned by day, clustered by user/merchant) |
+| `dim_users` | Dim | Customer information (derived from nameOrig) |
+| `dim_merchants` | Dim | Merchant/store information (derived from nameDest) |
+| `dim_transaction_type` | Dim | Transaction type configuration & reward rules |
+| `dim_location` | Dim | Geographic information (10 Vietnamese cities) |
+| `dim_date` | Dim | Standard date dimension (year 2026) |
+
+## Prerequisites
 
 - Python 3.8+
 - Docker & Docker Compose
-- Tài khoản Kaggle (để tải dataset nếu chưa có)
+- Kaggle account (to download the dataset)
+- Google Cloud account with BigQuery API enabled
+- Service Account JSON with `BigQuery Data Editor` + `BigQuery Job User` roles
 
-## Cấu trúc thư mục
+## Project Structure
 
 ```text
 KLTN_2/
+├── credentials/                                 # Service Account JSON (git ignored)
+│   └── service-account.json
 ├── data/
-│   └── PS_20174392719_1491204439457_log.csv  # File dataset (sau khi giải nén)
-├── venv/                                     # Môi trường Python ảo (Virtual Environment)
-├── .env                                      # File lưu cấu hình tham số môi trường
-├── docker-compose.yml                        # Cấu hình Kafka & Zookeeper Docker
-├── download_dataset.py                       # Script tải dataset từ Kaggle
-├── kafka_producer.py                         # Script chính để chạy luồng ingestion
-├── requirements.txt                          # Các thư viện Python cần thiết
-└── README.md                                 # File hướng dẫn này
+│   └── PS_20174392719_1491204439457_log.csv     # Dataset file (git ignored)
+├── .env                                         # Environment variables (git ignored)
+├── docker-compose.yml                           # Kafka, Zookeeper, Spark Docker config
+├── Dockerfile.spark                             # Spark container image
+├── kafka_producer.py                            # Week 1: CSV → Kafka Producer
+├── spark_processor.py                           # Week 2: Kafka → Spark → BigQuery
+├── bigquery_schema.py                           # Week 3: Create Star Schema on BQ
+├── seed_dimensions.py                           # Week 3: Seed Dimension tables
+├── download_dataset.py                          # Script to download dataset from Kaggle
+├── requirements.txt                             # Python dependencies
+└── README.md
 ```
 
-## Các Bước Cài đặt & Chạy (Quickstart)
+## Quickstart Guide
 
-### Bước 0: (Tùy chọn) Tải Data từ Kaggle
-Nếu bạn chưa có file `PS_2017...log.csv`, bạn có thể tải tự động bằng `download_dataset.py`.
-Yêu cầu:
-1. Đăng nhập Kaggle -> Account -> Create New API Token (sẽ tải về file `kaggle.json`).
-2. Đặt `kaggle.json` vào thư mục `~/.kaggle/` (với Windows là `C:\Users\<Tên_User>\.kaggle\kaggle.json`).
-3. Chạy `python download_dataset.py` sau khi đã thiết lập môi trường Python (Bước 2).
+### Step 0: (Optional) Download Data from Kaggle
+If you don't have the `PS_2017...log.csv` file yet:
+1. Go to Kaggle → Account → Create New API Token (downloads `kaggle.json`).
+2. Place `kaggle.json` in `~/.kaggle/` (Windows: `C:\Users\<Username>\.kaggle\kaggle.json`).
+3. Run `python download_dataset.py` after setting up the Python environment (Step 2).
 
-
-### Bước 1: Khởi động Kafka & Zookeeper
-
-Mở terminal ở thư mục dự án và chạy Docker Compose để khởi tạo Infrastructure:
+### Step 1: Start Kafka & Zookeeper
 
 ```bash
 docker-compose up -d
 ```
 
-Để kiểm tra xem Kafka và Zookeeper đã chạy hay chưa:
-
+Verify containers are running:
 ```bash
 docker ps
 ```
-(Bạn sẽ thấy 2 container là `kafka` và `zookeeper` đang chạy)
 
-### Bước 2: Thiết lập Môi trường Python
-
-Tạo và kích hoạt môi trường ảo (virtual environment), sau đó cài đặt các gói phụ thuộc:
+### Step 2: Set Up Python Environment
 
 ```powershell
-# Tạo môi trường ảo
+# Create virtual environment
 python -m venv venv
 
-# Kích hoạt môi trường (Windows PowerShell)
+# Activate (Windows PowerShell)
 .\venv\Scripts\activate
 
-# Cài đặt thư viện
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### Bước 3: Cấu hình biến môi trường (`.env`)
-
-Mở file `.env` và tùy chỉnh theo ý muốn. File mẫu trông như thế này:
+### Step 3: Configure Environment Variables (`.env`)
 
 ```env
-# Mặc định cấu hình
-CSV_PATH=data/PS_20174392719_1491204439457_log.csv
+# Kafka
 KAFKA_BOOTSTRAP_SERVERS=localhost:9092
 KAFKA_TOPIC=payment_events
 DUPLICATE_RATIO=0.10
-BATCH_SIZE=65536
-LINGER_MS=50
-BUFFER_MEMORY=67108864
+
+# BigQuery
+BQ_PROJECT_ID=your-gcp-project-id
+BQ_DATASET=paysim_dw
+GOOGLE_APPLICATION_CREDENTIALS=credentials/service-account.json
 ```
 
-### Bước 4: Chạy Kafka Producer
-
-Khởi chạy script ingestion để bắt đầu quá trình đọc, xử lý và bắn dữ liệu vào Kafka:
+### Step 4: Set Up BigQuery Star Schema
 
 ```powershell
-# Chắc chắn rằng venv đang được kích hoạt
+# Create dataset + 6 tables
+python bigquery_schema.py
+
+# Seed 5 Dimension tables with sample data
+python seed_dimensions.py
+```
+
+### Step 5: Run Kafka Producer
+
+```powershell
 python kafka_producer.py
 ```
 
-Console sẽ log ra quá trình xử lý:
-- Số lượng bản ghi `PAYMENT` được lọc ra.
-- Quá trình bơm lỗi Duplicate (10%).
-- Tiến độ bắn vào Kafka (tốc độ tham khảo khoảng 6000 - 8000 msg/s tùy cấu hình máy).
-- Thống kê chốt (tổng số gửi thành công, số lượng duplicates...).
+### Step 6: Run Spark Processor
 
-### Bước 5: Kiểm tra dữ liệu trong Kafka (Tuỳ chọn)
+```powershell
+# Run locally (with BigQuery)
+python spark_processor.py
 
-Để xác nhận dữ liệu đã được bắn vào topic `payment_events`, hãy đọc thử (consume) một vài message từ Kafka broker:
-
-```bash
-docker exec -it kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic payment_events --from-beginning --max-messages 5
+# Or run via Docker
+docker-compose up spark-processor
 ```
 
-Bạn sẽ thấy dữ liệu JSON in ra như sau:
-```json
-{"step": 1, "type": "PAYMENT", "amount": 9839.64, "nameOrig": "C1231006815", "oldbalanceOrg": 170136.0, "newbalanceOrig": 160296.36, "nameDest": "M1979787155", "oldbalanceDest": 0.0, "newbalanceDest": 0.0, "isFraud": 0, "isFlaggedFraud": 0, "transaction_id": "848bb28a-...", "event_timestamp": "2026-03-03T13:20:00+00:00"}
+### Step 7: Verify Data on BigQuery
+
+Open [BigQuery Console](https://console.cloud.google.com/bigquery) → select dataset `paysim_dw`:
+```sql
+SELECT * FROM paysim_dw.fact_transactions LIMIT 10;
 ```
 
-## Cách Tùy Biến (Customizing Pipelines)
+## Configuration
 
-Bạn có thể chỉnh sửa file `.env` để làm thay đổi logic hoạt động của script theo ý mình:
-- Đổi file CSV đường dẫn: Sửa `CSV_PATH`.
-- Đổi % lỗi lặp Duplicate: Cập nhật `DUPLICATE_RATIO`.
-- Chỉnh hiệu suất thông lượng gửi Kafka: Điều chỉnh `BATCH_SIZE`, `LINGER_MS`, `BUFFER_MEMORY`.
+You can customize the pipeline behavior by editing the `.env` file:
+- **CSV path:** Change `CSV_PATH`
+- **Duplicate ratio:** Adjust `DUPLICATE_RATIO` (default: 10%)
+- **Kafka throughput:** Tune `BATCH_SIZE`, `LINGER_MS`, `BUFFER_MEMORY`
+- **BigQuery target:** Change `BQ_PROJECT_ID`, `BQ_DATASET`
+
+
