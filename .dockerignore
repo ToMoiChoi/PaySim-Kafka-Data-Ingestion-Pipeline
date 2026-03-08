@@ -1,5 +1,11 @@
-data/
-__pycache__/
 venv/
-spark.log
+.env
+data/
+*.csv
 .git/
+__pycache__/
+*.pyc
+.idea/
+.vscode/
+bq_backup/
+credentials/*.json

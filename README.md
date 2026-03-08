@@ -205,4 +205,124 @@ You can customize the pipeline behavior by editing the `.env` file:
 - **Kafka throughput:** Tune `BATCH_SIZE`, `LINGER_MS`, `BUFFER_MEMORY`
 - **BigQuery target:** Change `BQ_PROJECT_ID`, `BQ_DATASET`
 
+## How to Query Data
 
+Sau khi pipeline chạy xong, dữ liệu được lưu ở **2 nơi** với các cách truy vấn khác nhau.
+
+---
+
+### 🐘 PostgreSQL (Primary Sink – Real-time)
+
+#### Cách 1: psql CLI (nhanh nhất)
+
+```bash
+# Kết nối vào PostgreSQL container
+docker exec -it postgres psql -U paysim -d paysim_dw
+
+# Xem tổng số giao dịch
+SELECT COUNT(*) FROM fact_transactions;
+
+# Xem 10 giao dịch gần nhất
+SELECT * FROM fact_transactions ORDER BY transaction_time DESC LIMIT 10;
+
+# Thống kê theo loại giao dịch
+SELECT type_id, COUNT(*) as total, SUM(amount) as total_amount
+FROM fact_transactions
+GROUP BY type_id;
+
+# Join với dim table
+SELECT f.transaction_id, f.user_id, f.amount, f.reward_points
+FROM fact_transactions f LIMIT 10;
+```
+
+#### Cách 2: Python – psycopg2
+
+```python
+import psycopg2
+import pandas as pd
+
+conn = psycopg2.connect(
+    host="localhost", port=5432,
+    dbname="paysim_dw", user="paysim", password="paysim123"
+)
+df = pd.read_sql("SELECT * FROM fact_transactions LIMIT 100", conn)
+print(df.head())
+conn.close()
+```
+
+#### Cách 3: pandas – connection string ngắn hơn
+
+```python
+import pandas as pd
+
+CONN = "postgresql://paysim:paysim123@localhost:5432/paysim_dw"
+df = pd.read_sql("SELECT * FROM fact_transactions", CONN)
+print(df.describe())
+```
+
+#### Cách 4: SQLAlchemy
+
+```python
+from sqlalchemy import create_engine, text
+
+engine = create_engine("postgresql+psycopg2://paysim:paysim123@localhost:5432/paysim_dw")
+with engine.connect() as conn:
+    result = conn.execute(text("SELECT COUNT(*) FROM fact_transactions"))
+    print(result.fetchone())
+```
+
+---
+
+### ☁️ BigQuery (Backup Sink – Analytics)
+
+#### Cách 1: Google Cloud Console
+Vào [console.cloud.google.com](https://console.cloud.google.com/) → BigQuery → `ecommerce-db2025.paysim_dw.fact_transactions`
+
+#### Cách 2: Python – google-cloud-bigquery
+
+```python
+from google.cloud import bigquery
+
+client = bigquery.Client(project="ecommerce-db2025")
+query = """
+    SELECT type_id, COUNT(*) as total, ROUND(SUM(amount), 2) as total_amount
+    FROM `ecommerce-db2025.paysim_dw.fact_transactions`
+    GROUP BY type_id
+"""
+df = client.query(query).to_dataframe()
+print(df)
+```
+
+#### Cách 3: pandas-gbq
+
+```python
+import pandas_gbq
+
+df = pandas_gbq.read_gbq(
+    "SELECT * FROM paysim_dw.fact_transactions LIMIT 1000",
+    project_id="ecommerce-db2025",
+    credentials_path="credentials/service-account.json"
+)
+print(df.head())
+```
+
+---
+
+### 📋 Các query phân tích hữu ích
+
+```sql
+-- Top 5 user giao dịch nhiều nhất
+SELECT user_id, COUNT(*) as txn_count, SUM(amount) as total_amount
+FROM fact_transactions
+GROUP BY user_id ORDER BY txn_count DESC LIMIT 5;
+
+-- Số giao dịch + doanh thu theo ngày
+SELECT date_key, COUNT(*) as txn_count, SUM(amount) as daily_volume
+FROM fact_transactions
+GROUP BY date_key ORDER BY date_key;
+
+-- Phân tích reward points
+SELECT MIN(reward_points) as min, MAX(reward_points) as max,
+       AVG(reward_points) as avg, SUM(reward_points) as total
+FROM fact_transactions;
+```

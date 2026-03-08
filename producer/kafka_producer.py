@@ -1,5 +1,5 @@
 """
-PaySim CSV → Kafka Producer Pipeline : Data Ingestion Pipeline
+PaySim CSV -> Kafka Producer Pipeline : Data Ingestion Pipeline
 =====================================
 1. Đọc file PaySim CSV bằng pandas - Dataset: Kaggle PaySim Dataset
 2. Lọc giao dịch type == "PAYMENT"
@@ -121,14 +121,14 @@ def produce_messages(producer: KafkaProducer, df: pd.DataFrame, topic: str):
             success_count += 1
         except Exception as e:
             error_count += 1
-            print(f"      ❌ Lỗi gửi record {idx}: {e}")
+            print(f"      [ERRO] Lỗi gửi record {idx}: {e}")
 
         # Log tiến trình mỗi 50,000 messages
         sent = success_count + error_count
         if sent % 50000 == 0:
             elapsed = time.time() - start_time
             rate = sent / elapsed if elapsed > 0 else 0
-            print(f"      📤 {sent:,} / {total:,} messages "
+            print(f"      [SEND] {sent:,} / {total:,} messages "
                   f"({sent/total*100:.1f}%) | {rate:,.0f} msg/s")
 
     # Flush đảm bảo tất cả messages đã được gửi
@@ -136,7 +136,7 @@ def produce_messages(producer: KafkaProducer, df: pd.DataFrame, topic: str):
     producer.close()
 
     print(f"\n{'='*60}")
-    print(f"✅ HOÀN TẤT!")
+    print(f"[DONE] HOÀN TẤT!")
     print(f"   Topic:           {topic}")
     print(f"   Tổng gửi:        {success_count:,} messages")
     print(f"   Lỗi:             {error_count:,} messages")
@@ -147,7 +147,7 @@ def produce_messages(producer: KafkaProducer, df: pd.DataFrame, topic: str):
 
 def main():
     print("=" * 60)
-    print("  PaySim CSV → Kafka Producer Pipeline")
+    print("  PaySim CSV -> Kafka Producer Pipeline")
     print("=" * 60)
     print()
 

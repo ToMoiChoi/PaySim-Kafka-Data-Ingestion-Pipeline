@@ -11,9 +11,10 @@ WORKDIR /app
 ENV SPARK_LOCAL_IP=127.0.0.1
 ENV PYSPARK_SUBMIT_ARGS="--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.7.3 pyspark-shell"
 
-# Install Python dependencies
+# Install Python dependencies (without cache to save space)
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    rm -rf /root/.cache/pip
 
 # Copy the application code
 COPY . .

@@ -1,5 +1,5 @@
 """
-warehouse/seed_dimensions_pg.py – Seed dữ liệu mẫu vào PostgreSQL Dimension tables
+warehouse/seed_dimensions_pg.py - Seed dữ liệu mẫu vào PostgreSQL Dimension tables
 ====================================================================================
 Chạy SAU khi đã chạy postgres_schema.py để tạo bảng.
 
@@ -31,16 +31,42 @@ USER_SEGMENTS       = ["Standard", "Gold", "Diamond"]
 SEGMENT_WEIGHTS     = [0.60, 0.30, 0.10]
 
 LOCATIONS = [
-    ("LOC_HCM", "TP. Hồ Chí Minh", "Nam"),
-    ("LOC_HN",  "Hà Nội",          "Bắc"),
-    ("LOC_DN",  "Đà Nẵng",         "Trung"),
-    ("LOC_HP",  "Hải Phòng",       "Bắc"),
-    ("LOC_CT",  "Cần Thơ",         "Nam"),
-    ("LOC_HUE", "Huế",             "Trung"),
-    ("LOC_NT",  "Nha Trang",       "Trung"),
-    ("LOC_DL",  "Đà Lạt",          "Trung"),
-    ("LOC_VT",  "Vũng Tàu",        "Nam"),
-    ("LOC_BD",  "Bình Dương",       "Nam"),
+    # ─ Bắc ─────────────────────────────────────────────────────
+    ("LOC_VN_HNI", "Hà Nội",             "Bắc"),
+    ("LOC_VN_HPG", "Hải Phòng",           "Bắc"),
+    ("LOC_VN_HGG", "Hà Giang",             "Bắc"),
+    ("LOC_VN_CBG", "Cao Bằng",             "Bắc"),
+    ("LOC_VN_LCI", "Lào Cai",              "Bắc"),
+    ("LOC_VN_LSN", "Lạng Sơn",             "Bắc"),
+    ("LOC_VN_TQG", "Tuyên Quang",           "Bắc"),
+    ("LOC_VN_TNG", "Thái Nguyên",           "Bắc"),
+    ("LOC_VN_BGG", "Bắc Giang",             "Bắc"),
+    ("LOC_VN_PTH", "Phú Thọ",              "Bắc"),
+    ("LOC_VN_BNH", "Bắc Ninh",             "Bắc"),
+    ("LOC_VN_HYN", "Hưng Yên",             "Bắc"),
+    ("LOC_VN_HDG", "Hải Dương",            "Bắc"),
+    ("LOC_VN_NDH", "Nam Định",             "Bắc"),
+    # ─ Trung ───────────────────────────────────────────────
+    ("LOC_VN_THA", "Thanh Hóa",             "Trung"),
+    ("LOC_VN_NAN", "Nghệ An",              "Trung"),
+    ("LOC_VN_HTH", "Hà Tĩnh",              "Trung"),
+    ("LOC_VN_DNG", "Đà Nẵng",              "Trung"),
+    ("LOC_VN_HUE", "Thừa Thiên-Huế",       "Trung"),
+    ("LOC_VN_QNM", "Quảng Nam",             "Trung"),
+    ("LOC_VN_QNG", "Quảng Ngãi",            "Trung"),
+    ("LOC_VN_BDH", "Bình Định",             "Trung"),
+    ("LOC_VN_PYN", "Phú Yên",              "Trung"),
+    ("LOC_VN_KHA", "Khánh Hòa",             "Trung"),
+    ("LOC_VN_DLK", "Đắk Lậk",              "Trung"),
+    ("LOC_VN_LDG", "Lâm Đồng",              "Trung"),
+    # ─ Nam ─────────────────────────────────────────────────────
+    ("LOC_VN_HCM", "TP. Hồ Chí Minh",      "Nam"),
+    ("LOC_VN_CTH", "Cần Thơ",              "Nam"),
+    ("LOC_VN_BPC", "Bình Phước",            "Nam"),
+    ("LOC_VN_TNH", "Tây Ninh",              "Nam"),
+    ("LOC_VN_BDG", "Bình Dương",            "Nam"),
+    ("LOC_VN_DNI", "Đồng Nai",              "Nam"),
+    ("LOC_VN_BVT", "Bà Rịa-Vũng Tàu",      "Nam"),
 ]
 
 TRANSACTION_TYPES = [
@@ -54,14 +80,15 @@ TRANSACTION_TYPES = [
 
 def seed_table(engine, table_name: str, df: pd.DataFrame) -> int:
     """Insert DataFrame vào PostgreSQL table (TRUNCATE trước nếu cần)."""
-    print(f"    📤 Nạp {len(df):,} rows → {table_name}...")
-    df.to_sql(table_name, engine, if_exists="append", index=False, method="multi", chunksize=1000)
+    print(f"    [SEND] Nạp {len(df):,} rows -> {table_name}...")
+    with engine.begin() as conn:
+        df.to_sql(table_name, conn, if_exists="append", index=False, method="multi", chunksize=1000)
     return len(df)
 
 
 def main():
     print("=" * 60)
-    print("  Seed Dimension Tables – PostgreSQL")
+    print("  Seed Dimension Tables - PostgreSQL")
     print("=" * 60)
     print(f"  Host : {PG_HOST}:{PG_PORT}/{PG_DB}")
     print()
@@ -71,7 +98,7 @@ def main():
     random.seed(42)
 
     # 1. dim_transaction_type
-    print("📋 [1/5] Seeding dim_transaction_type...")
+    print("[STEP] [1/5] Seeding dim_transaction_type...")
     df_tt = pd.DataFrame([
         {"type_id": t, "type_name": n, "is_reward_eligible": e, "reward_multiplier": m}
         for t, n, e, m in TRANSACTION_TYPES
@@ -79,7 +106,7 @@ def main():
     results["dim_transaction_type"] = seed_table(engine, "dim_transaction_type", df_tt)
 
     # 2. dim_location
-    print("📋 [2/5] Seeding dim_location...")
+    print("[STEP] [2/5] Seeding dim_location...")
     df_loc = pd.DataFrame([
         {"location_id": lid, "city": city, "region": region}
         for lid, city, region in LOCATIONS
@@ -87,9 +114,9 @@ def main():
     results["dim_location"] = seed_table(engine, "dim_location", df_loc)
 
     # 3. dim_date
-    print("📋 [3/5] Seeding dim_date (năm 2026)...")
-    current = date(2026, 1, 1)
-    end     = date(2026, 12, 31)
+    print("[STEP] [3/5] Seeding dim_date (năm 2026)...")
+    current = date(2025, 1, 1)
+    end     = date(2030, 12, 31)
     date_rows = []
     while current <= end:
         dow = current.isoweekday()
@@ -106,7 +133,7 @@ def main():
     results["dim_date"] = seed_table(engine, "dim_date", pd.DataFrame(date_rows))
 
     # 4. dim_users (từ CSV)
-    print(f"📋 [4/5] Seeding dim_users (từ {CSV_PATH})...")
+    print(f"[STEP] [4/5] Seeding dim_users (từ {CSV_PATH})...")
     df = pd.read_csv(CSV_PATH, usecols=["type", "nameOrig", "oldbalanceOrg"])
     df = df[df["type"] == "PAYMENT"]
     users = df.groupby("nameOrig")["oldbalanceOrg"].max().reset_index()
@@ -118,7 +145,7 @@ def main():
     results["dim_users"] = seed_table(engine, "dim_users", users)
 
     # 5. dim_merchants (từ CSV)
-    print(f"📋 [5/5] Seeding dim_merchants (từ {CSV_PATH})...")
+    print(f"[STEP] [5/5] Seeding dim_merchants (từ {CSV_PATH})...")
     df2 = pd.read_csv(CSV_PATH, usecols=["type", "nameDest"])
     df2 = df2[df2["type"] == "PAYMENT"]
     merchants_ids = [m for m in df2["nameDest"].unique() if str(m).startswith("M")]
@@ -131,9 +158,9 @@ def main():
 
     # Tổng kết
     print(f"\n{'='*60}")
-    print("✅ KẾT QUẢ SEED (PostgreSQL):")
+    print("[DONE] KẾT QUẢ SEED (PostgreSQL):")
     for table, count in results.items():
-        print(f"   {table:30s} → {count:>8,} rows")
+        print(f"   {table:30s} -> {count:>8,} rows")
     print("=" * 60)
 
 

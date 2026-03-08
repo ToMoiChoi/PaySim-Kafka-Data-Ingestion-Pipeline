@@ -1,5 +1,5 @@
 """
-warehouse/postgres_schema.py – Tạo Star Schema trên PostgreSQL
+warehouse/postgres_schema.py - Tạo Star Schema trên PostgreSQL
 ==============================================================
 Chạy script này để khởi tạo toàn bộ bảng Star Schema trong PostgreSQL:
   - 1 Fact table : fact_transactions
@@ -89,7 +89,15 @@ DDL_STATEMENTS = [
         date_key         BIGINT,
         transaction_time TIMESTAMP,
         amount           NUMERIC(20, 2),
-        reward_points    BIGINT
+        reward_points    BIGINT,
+        type             VARCHAR(20),
+        step             INTEGER,
+        "oldbalanceOrg"  NUMERIC(20, 2),
+        "newbalanceOrig" NUMERIC(20, 2),
+        "oldbalanceDest" NUMERIC(20, 2),
+        "newbalanceDest" NUMERIC(20, 2),
+        "isFraud"        INTEGER,
+        "isFlaggedFraud" INTEGER
     );
     """,
 
@@ -102,7 +110,7 @@ DDL_STATEMENTS = [
 
 def main():
     print("=" * 60)
-    print("  PostgreSQL Star Schema – Khởi tạo Data Warehouse")
+    print("  PostgreSQL Star Schema - Khởi tạo Data Warehouse")
     print("=" * 60)
     print(f"  Host : {PG_HOST}:{PG_PORT}")
     print(f"  DB   : {PG_DB}")
@@ -110,12 +118,11 @@ def main():
 
     engine = sa.create_engine(DATABASE_URL)
 
-    with engine.connect() as conn:
+    with engine.begin() as conn:
         for stmt in DDL_STATEMENTS:
             conn.execute(text(stmt))
-        conn.commit()
 
-    print("✅ HOÀN TẤT! Star Schema đã tạo trong PostgreSQL:")
+    print("[DONE] HOÀN TẤT! Star Schema đã tạo trong PostgreSQL:")
     print("   fact_transactions, dim_users, dim_merchants,")
     print("   dim_transaction_type, dim_location, dim_date")
     print("=" * 60)

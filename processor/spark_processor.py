@@ -1,16 +1,16 @@
 """
-processor/spark_processor.py – Dual-Sink Spark Structured Streaming
+processor/spark_processor.py - Dual-Sink Spark Structured Streaming
 ====================================================================
 Luồng xử lý:
   1. Đọc stream từ Kafka topic `payment_events`.
   2. Parse JSON schema.
-  3. Ép kiểu event_timestamp → TimestampType.
-  4. Watermark (5 phút) + dropDuplicates(transaction_id) – Kiểm soát trùng lặp.
+  3. Ép kiểu event_timestamp -> TimestampType.
+  4. Watermark (5 phút) + dropDuplicates(transaction_id) - Kiểm soát trùng lặp.
   5. Tính reward_points = int(amount × 0.01).
-  6. Transform → Star Schema (fact_transactions).
-  7. foreachBatch – Dual Sink:
+  6. Transform -> Star Schema (fact_transactions).
+  7. foreachBatch - Dual Sink:
        a. [PRIMARY]  Ghi vào PostgreSQL  (UPSERT qua JDBC, real-time).
-       b. [BACKUP]   Ghi Parquet → Load Job lên BigQuery (batch, miễn phí Sandbox).
+       b. [BACKUP]   Ghi Parquet -> Load Job lên BigQuery (batch, miễn phí Sandbox).
 """
 
 import os
@@ -56,11 +56,22 @@ BQ_TABLE_FACT = "fact_transactions"
 GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 BQ_PARQUET_DIR = os.getenv("BQ_PARQUET_BACKUP_DIR", "/tmp/bq_backup")
 
-# Location pool
+# Location pool - 34 tỉnh/thành Việt Nam
 LOCATION_IDS = [
-    "LOC_HCM", "LOC_HN", "LOC_DN", "LOC_HP", "LOC_CT",
-    "LOC_HUE", "LOC_NT", "LOC_DL", "LOC_VT", "LOC_BD",
+    # Bắc
+    "LOC_VN_HNI", "LOC_VN_HPG", "LOC_VN_HGG", "LOC_VN_CBG",
+    "LOC_VN_LCI", "LOC_VN_LSN", "LOC_VN_TQG", "LOC_VN_TNG",
+    "LOC_VN_BGG", "LOC_VN_PTH", "LOC_VN_BNH", "LOC_VN_HYN",
+    "LOC_VN_HDG", "LOC_VN_NDH",
+    # Trung
+    "LOC_VN_THA", "LOC_VN_NAN", "LOC_VN_HTH", "LOC_VN_DNG",
+    "LOC_VN_HUE", "LOC_VN_QNM", "LOC_VN_QNG", "LOC_VN_BDH",
+    "LOC_VN_PYN", "LOC_VN_KHA", "LOC_VN_DLK", "LOC_VN_LDG",
+    # Nam
+    "LOC_VN_HCM", "LOC_VN_CTH", "LOC_VN_BPC", "LOC_VN_TNH",
+    "LOC_VN_BDG", "LOC_VN_DNI", "LOC_VN_BVT",
 ]
+
 
 # ─── Kafka Schema ────────────────────────────────────────────────
 payment_schema = StructType([
@@ -92,14 +103,16 @@ def create_spark_session() -> SparkSession:
             "org.postgresql:postgresql:42.7.3"
         )
         .config("spark.sql.shuffle.partitions", "2")
-        .config("spark.driver.memory", "4g")
-        .config("spark.executor.memory", "4g")
+        .config("spark.driver.memory", "1g")  # <-- Giảm từ 4g xuống 1g để tối ưu RAM
+        .config("spark.executor.memory", "1g") # <-- Giảm từ 4g xuống 1g
+        .config("spark.memory.fraction", "0.6") # Giữ heap memory gọn nhẹ
+        .config("spark.sql.execution.arrow.pyspark.enabled", "true") # Tăng tốc xử lý Pandas/UDF
     )
 
     return builder.getOrCreate()
 
 
-# ─── Transform: Kafka DF → fact schema ──────────────────────────
+# ─── Transform: Kafka DF -> fact schema ──────────────────────────
 def build_fact_df(parsed_df: DataFrame) -> DataFrame:
 
     @udf(returnType=StringType())
@@ -136,12 +149,18 @@ def build_fact_df(parsed_df: DataFrame) -> DataFrame:
         .withColumn("date_key",
             date_format(col("transaction_time"), "yyyyMMdd").cast("long")
         )
-        .withColumn("amount",        col("amount").cast("decimal(38,9)"))
-        .withColumn("reward_points", (col("amount") * 0.01).cast("long"))
+        .withColumn("amount",          col("amount").cast("decimal(38,9)"))
+        .withColumn("reward_points",   (col("amount") * 0.01).cast("long"))
+        .withColumn("oldbalanceOrg",   col("oldbalanceOrg").cast("decimal(38,9)"))
+        .withColumn("newbalanceOrig",  col("newbalanceOrig").cast("decimal(38,9)"))
+        .withColumn("oldbalanceDest",  col("oldbalanceDest").cast("decimal(38,9)"))
+        .withColumn("newbalanceDest",  col("newbalanceDest").cast("decimal(38,9)"))
         .select(
             "transaction_id", "user_id", "merchant_id",
             "type_id", "location_id", "date_key",
             "transaction_time", "amount", "reward_points",
+            "type", "step", "oldbalanceOrg", "newbalanceOrig",
+            "oldbalanceDest", "newbalanceDest", "isFraud", "isFlaggedFraud"
         )
     )
     return fact_df
@@ -149,7 +168,7 @@ def build_fact_df(parsed_df: DataFrame) -> DataFrame:
 
 # ─── Sink 1: PostgreSQL (Primary, real-time) ─────────────────────
 def write_to_postgres(batch_df: DataFrame, batch_id: int, row_count: int):
-    """Ghi batch vào PostgreSQL bằng JDBC – UPSERT qua temp table."""
+    """Ghi batch vào PostgreSQL bằng JDBC - UPSERT qua temp table."""
     t0 = time.time()
 
     # Ghi vào staging table tạm, rồi UPSERT vào fact_transactions
@@ -167,7 +186,7 @@ def write_to_postgres(batch_df: DataFrame, batch_id: int, row_count: int):
         .save()
     )
 
-    # UPSERT từ staging → fact_transactions (dùng psycopg2)
+    # UPSERT từ staging -> fact_transactions (dùng psycopg2)
     import psycopg2
     conn = psycopg2.connect(
         host=PG_HOST, port=PG_PORT, dbname=PG_DB,
@@ -186,11 +205,19 @@ def write_to_postgres(batch_df: DataFrame, batch_id: int, row_count: int):
                 user_id          = EXCLUDED.user_id,
                 merchant_id      = EXCLUDED.merchant_id,
                 type_id          = EXCLUDED.type_id,
+                type             = EXCLUDED.type,
                 location_id      = EXCLUDED.location_id,
                 date_key         = EXCLUDED.date_key,
                 transaction_time = EXCLUDED.transaction_time,
                 amount           = EXCLUDED.amount,
-                reward_points    = EXCLUDED.reward_points
+                reward_points    = EXCLUDED.reward_points,
+                step             = EXCLUDED.step,
+                "oldbalanceOrg"  = EXCLUDED."oldbalanceOrg",
+                "newbalanceOrig" = EXCLUDED."newbalanceOrig",
+                "oldbalanceDest" = EXCLUDED."oldbalanceDest",
+                "newbalanceDest" = EXCLUDED."newbalanceDest",
+                "isFraud"        = EXCLUDED."isFraud",
+                "isFlaggedFraud" = EXCLUDED."isFlaggedFraud"
         """)
         cur.execute(f"TRUNCATE TABLE {staging}")
     conn.commit()
@@ -198,36 +225,39 @@ def write_to_postgres(batch_df: DataFrame, batch_id: int, row_count: int):
 
     elapsed = int((time.time() - t0) * 1000)
     logger.info(
-        f"[Batch {batch_id}] 🐘 PostgreSQL UPSERT | "
+        f"[Batch {batch_id}] --> PostgreSQL UPSERT | "
         f"rows={row_count:,} | latency={elapsed}ms"
     )
 
 
-# ─── Sink 2: BigQuery Backup (batch Parquet → Load Job) ──────────
+# ─── Sink 2: BigQuery Backup (batch Parquet -> Load Job) ──────────
 def write_to_bq_backup(batch_df: DataFrame, batch_id: int, row_count: int):
-    """Ghi Parquet file → BigQuery Load Job (miễn phí Sandbox)."""
+    """Ghi Parquet file -> BigQuery Load Job (miễn phí Sandbox)."""
     if not BQ_PROJECT_ID:
-        logger.warning("[BQ Backup] BQ_PROJECT_ID trống → skip BigQuery backup.")
+        logger.warning("[BQ Backup] BQ_PROJECT_ID trống -> skip BigQuery backup.")
         return
 
     t0 = time.time()
     parquet_path = f"{BQ_PARQUET_DIR}/batch_{batch_id}"
 
-    # Ghi Parquet ra disk
-    batch_df.write.mode("overwrite").parquet(parquet_path)
+    # Ghi Parquet ra disk (nhiều part-file)
+    batch_df.coalesce(1).write.mode("overwrite").parquet(parquet_path)
 
-    # Dùng google-cloud-bigquery để load file lên BigQuery
+    # Dùng google-cloud-bigquery để load TẤT CẢ file lên BigQuery
     try:
         from google.cloud import bigquery
+        import glob
+
         client   = bigquery.Client(project=BQ_PROJECT_ID)
         table_id = f"{BQ_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE_FACT}"
 
-        # Lấy danh sách file Parquet vừa ghi
-        import glob
+        # Lấy danh sách TẤT CẢ file Parquet vừa ghi
         parquet_files = glob.glob(f"{parquet_path}/*.parquet")
         if not parquet_files:
             logger.warning(f"[BQ Backup] Batch {batch_id}: Không có file Parquet để load.")
             return
+
+        logger.info(f"[BQ Backup] Batch {batch_id}: Đang load {len(parquet_files)} parquet file(s) lên BigQuery...")
 
         job_config = bigquery.LoadJobConfig(
             write_disposition="WRITE_APPEND",
@@ -235,17 +265,21 @@ def write_to_bq_backup(batch_df: DataFrame, batch_id: int, row_count: int):
             schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
         )
 
-        with open(parquet_files[0], "rb") as f:
-            job = client.load_table_from_file(f, table_id, job_config=job_config)
-            job.result()
+        # Load từng file một (vì Sandbox không hỗ trợ multi-file URI)
+        total_loaded = 0
+        for pf in parquet_files:
+            with open(pf, "rb") as f:
+                job = client.load_table_from_file(f, table_id, job_config=job_config)
+                job.result()  # chờ load xong
+                total_loaded += 1
 
         elapsed = int((time.time() - t0) * 1000)
         logger.info(
-            f"[Batch {batch_id}] ☁️  BigQuery backup | "
-            f"rows={row_count:,} | latency={elapsed}ms"
+            f"[Batch {batch_id}] -->  BigQuery backup | "
+            f"files={total_loaded} | rows={row_count:,} | latency={elapsed}ms"
         )
     except Exception as e:
-        logger.warning(f"[BQ Backup] Batch {batch_id}: Lỗi backup → {e}")
+        logger.warning(f"[BQ Backup] Batch {batch_id}: Lỗi backup -> {e}")
 
 
 # ─── foreachBatch callback (Dual Sink) ───────────────────────────
@@ -253,10 +287,10 @@ def dual_sink_batch(batch_df: DataFrame, batch_id: int):
     row_count = batch_df.count()
 
     if row_count == 0:
-        logger.info(f"[Batch {batch_id}] ⚪ 0 rows – skip.")
+        logger.info(f"[Batch {batch_id}] [INFO] 0 rows - skip.")
         return
 
-    logger.info(f"[Batch {batch_id}] 📦 Processing {row_count:,} rows...")
+    logger.info(f"[Batch {batch_id}] [INFO] Processing {row_count:,} rows...")
 
     # Cache để tránh tính lại 2 lần
     batch_df.cache()
@@ -265,27 +299,34 @@ def dual_sink_batch(batch_df: DataFrame, batch_id: int):
     try:
         write_to_postgres(batch_df, batch_id, row_count)
     except Exception as e:
-        logger.error(f"[Batch {batch_id}] ❌ PostgreSQL sink lỗi: {e}")
+        logger.error(f"[Batch {batch_id}] [ERRO] PostgreSQL sink lỗi: {e}")
 
     # Sink 2: BigQuery backup
     try:
         write_to_bq_backup(batch_df, batch_id, row_count)
     except Exception as e:
-        logger.warning(f"[Batch {batch_id}] ⚠️ BigQuery backup lỗi: {e}")
+        logger.warning(f"[Batch {batch_id}] [WARN] BigQuery backup lỗi: {e}")
 
     batch_df.unpersist()
 
 
 # ─── Main ────────────────────────────────────────────────────────
+import sys
+
 def main():
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8')
+        
     print("=" * 65)
-    print("🚀  PaySim Dual-Sink Streaming  (PostgreSQL + BigQuery backup)")
-    print(f"📡  Kafka  : {KAFKA_BOOTSTRAP_SERVERS}  |  Topic: {KAFKA_TOPIC}")
-    print(f"🐘  PG     : {PG_HOST}:{PG_PORT}/{PG_DB}")
+    print("--> PaySim Dual-Sink Streaming (PostgreSQL + BigQuery backup)")
+    print(f"--> Kafka  : {KAFKA_BOOTSTRAP_SERVERS}  |  Topic: {KAFKA_TOPIC}")
+    print(f"--> PG     : {PG_HOST}:{PG_PORT}/{PG_DB}")
     if BQ_PROJECT_ID:
-        print(f"☁️   BQ     : {BQ_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE_FACT}  (backup)")
+        print(f"--> BQ     : {BQ_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE_FACT}  (backup)")
     else:
-        print("⚠️   BigQuery chưa cấu hình → chỉ ghi PostgreSQL")
+        print("--> BigQuery chưa cấu hình -> chỉ ghi PostgreSQL")
     print("=" * 65)
 
     spark = create_spark_session()
@@ -323,7 +364,7 @@ def main():
         .start()
     )
 
-    logger.info("✅ Stream đang chạy. Nhấn Ctrl+C để dừng.")
+    logger.info("[DONE] Stream đang chạy. Nhấn Ctrl+C để dừng.")
     query.awaitTermination()
 
 

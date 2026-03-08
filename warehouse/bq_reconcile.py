@@ -1,5 +1,5 @@
 """
-bq_reconcile.py – Đối soát dữ liệu BigQuery vs Kafka
+bq_reconcile.py - Đối soát dữ liệu BigQuery vs Kafka
 ======================================================
 Mục đích: Kiểm tra xem số row trong fact_transactions có khớp
            với số message Kafka đã produce hay không.
@@ -42,7 +42,7 @@ KAFKA_TOPIC             = os.getenv("KAFKA_TOPIC", "payment_events")
 MATCH_THRESHOLD         = float(os.getenv("RECONCILE_THRESHOLD", "0.90"))  # 90%
 
 if not PROJECT_ID:
-    logger.error("❌ Thiếu BQ_PROJECT_ID trong .env")
+    logger.error("[ERRO] Thiếu BQ_PROJECT_ID trong .env")
     sys.exit(1)
 
 
@@ -57,7 +57,7 @@ def count_bq_rows(table_name: str = "fact_transactions") -> int:
         for row in result:
             return int(row.cnt)
     except Exception as exc:
-        logger.warning(f"⚠️  Không thể query BigQuery: {exc}")
+        logger.warning(f"[WARN]  Không thể query BigQuery: {exc}")
         return -1
     return 0
 
@@ -82,7 +82,7 @@ def count_kafka_messages() -> int:
 
         partitions = consumer.partitions_for_topic(KAFKA_TOPIC)
         if not partitions:
-            logger.warning(f"⚠️  Topic '{KAFKA_TOPIC}' không tồn tại hoặc chưa có data.")
+            logger.warning(f"[WARN]  Topic '{KAFKA_TOPIC}' không tồn tại hoặc chưa có data.")
             consumer.close()
             return -1
 
@@ -101,7 +101,7 @@ def count_kafka_messages() -> int:
         return total
 
     except Exception as exc:
-        logger.warning(f"⚠️  Không thể kết nối Kafka: {exc}")
+        logger.warning(f"[WARN]  Không thể kết nối Kafka: {exc}")
         return -1
 
 
@@ -156,7 +156,7 @@ def bq_detail_stats() -> dict:
             })
 
     except Exception as exc:
-        logger.warning(f"⚠️  Không lấy được detail stats: {exc}")
+        logger.warning(f"[WARN]  Không lấy được detail stats: {exc}")
 
     return stats
 
@@ -168,7 +168,7 @@ def main():
     print("  📊  BigQuery Reconciliation Report")
     print(f"  ⏱️   {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     print(f"  🏗️   Project : {PROJECT_ID}  |  Dataset : {DATASET_ID}")
-    print(f"  📡  Kafka   : {KAFKA_BOOTSTRAP_SERVERS}  |  Topic : {KAFKA_TOPIC}")
+    print(f"  -->  Kafka   : {KAFKA_BOOTSTRAP_SERVERS}  |  Topic : {KAFKA_TOPIC}")
     print("=" * 65)
 
     # ── 1. Lấy số liệu ──────────────────────────────────────────
@@ -198,7 +198,7 @@ def main():
     print(f"│  {'BigQuery fact_transactions rows':<30}  │  {bq_str}  │")
 
     if match_pct is not None:
-        status_icon = "✅" if match_pct >= MATCH_THRESHOLD * 100 else "❌"
+        status_icon = "[DONE]" if match_pct >= MATCH_THRESHOLD * 100 else "[ERRO]"
         print(f"│  {'Match Percentage':<30}  │  {match_pct:>10.2f} %  │")
         print(f"│  {'Status':<30}  │  {status_icon + ' PASS' if match_pct >= MATCH_THRESHOLD * 100 else status_icon + ' FAIL':<18}  │")
     else:
@@ -237,11 +237,11 @@ def main():
     # ── 4. Exit code ─────────────────────────────────────────────
     if match_pct is not None and match_pct < MATCH_THRESHOLD * 100:
         logger.error(
-            f"❌ Match {match_pct:.1f}% < threshold {MATCH_THRESHOLD*100:.0f}% → EXIT 1"
+            f"[ERRO] Match {match_pct:.1f}% < threshold {MATCH_THRESHOLD*100:.0f}% -> EXIT 1"
         )
         sys.exit(1)
 
-    logger.info("✅ Reconciliation hoàn tất.")
+    logger.info("[DONE] Reconciliation hoàn tất.")
 
 
 if __name__ == "__main__":

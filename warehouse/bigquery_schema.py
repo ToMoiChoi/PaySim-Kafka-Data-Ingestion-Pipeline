@@ -1,5 +1,5 @@
 """
-BigQuery Star Schema – Tạo Dataset & 6 Bảng
+BigQuery Star Schema - Tạo Dataset & 6 Bảng
 =============================================
 Chạy script này một lần để khởi tạo Data Warehouse trên BigQuery:
   - 1 Fact table : fact_transactions
@@ -20,7 +20,7 @@ PROJECT_ID = os.getenv("BQ_PROJECT_ID")
 DATASET_ID = os.getenv("BQ_DATASET", "paysim_dw")
 
 if not PROJECT_ID:
-    raise ValueError("❌ Thiếu BQ_PROJECT_ID trong .env")
+    raise ValueError("[ERRO] Thiếu BQ_PROJECT_ID trong .env")
 
 FULL_DATASET = f"{PROJECT_ID}.{DATASET_ID}"
 
@@ -30,24 +30,41 @@ FULL_DATASET = f"{PROJECT_ID}.{DATASET_ID}"
 TABLES = {
     # ─── FACT TABLE ──────────────────────────────────────────────
     "fact_transactions": [
-        bigquery.SchemaField("transaction_id", "STRING", mode="REQUIRED",
+        bigquery.SchemaField("transaction_id", "STRING", mode="NULLABLE",
                              description="Mã giao dịch duy nhất (UUID)"),
         bigquery.SchemaField("user_id", "STRING", mode="NULLABLE",
-                             description="FK → dim_users"),
+                             description="FK -> dim_users"),
         bigquery.SchemaField("merchant_id", "STRING", mode="NULLABLE",
-                             description="FK → dim_merchants"),
+                             description="FK -> dim_merchants"),
         bigquery.SchemaField("type_id", "STRING", mode="NULLABLE",
-                             description="FK → dim_transaction_type"),
+                             description="FK -> dim_transaction_type"),
         bigquery.SchemaField("location_id", "STRING", mode="NULLABLE",
-                             description="FK → dim_location"),
+                             description="FK -> dim_location"),
         bigquery.SchemaField("date_key", "INT64", mode="NULLABLE",
-                             description="FK → dim_date (YYYYMMDD)"),
+                             description="FK -> dim_date (YYYYMMDD)"),
         bigquery.SchemaField("transaction_time", "TIMESTAMP", mode="NULLABLE",
                              description="Thời gian xử lý giao dịch"),
         bigquery.SchemaField("amount", "NUMERIC", mode="NULLABLE",
                              description="Giá trị giao dịch"),
         bigquery.SchemaField("reward_points", "INT64", mode="NULLABLE",
                              description="Điểm thưởng (amount × 0.01)"),
+        # --- ORIGINAL PAYSIM COLUMNS ---
+        bigquery.SchemaField("type", "STRING", mode="NULLABLE",
+                             description="Loại giao dịch gốc (CASH_IN, CASH_OUT, DEBIT, PAYMENT, TRANSFER)"),
+        bigquery.SchemaField("step", "INT64", mode="NULLABLE",
+                             description="Đơn vị thời gian thực tế (1 step = 1 hour)"),
+        bigquery.SchemaField("oldbalanceOrg", "NUMERIC", mode="NULLABLE",
+                             description="Số dư ban đầu của sender"),
+        bigquery.SchemaField("newbalanceOrig", "NUMERIC", mode="NULLABLE",
+                             description="Số dư sau giao dịch của sender"),
+        bigquery.SchemaField("oldbalanceDest", "NUMERIC", mode="NULLABLE",
+                             description="Số dư ban đầu của receiver"),
+        bigquery.SchemaField("newbalanceDest", "NUMERIC", mode="NULLABLE",
+                             description="Số dư sau giao dịch của receiver"),
+        bigquery.SchemaField("isFraud", "INT64", mode="NULLABLE",
+                             description="Đánh dấu gian lận (1=Fraud)"),
+        bigquery.SchemaField("isFlaggedFraud", "INT64", mode="NULLABLE",
+                             description="Đánh dấu gian lận của hệ thống cấm (1=Flagged)"),
     ],
 
     # ─── DIMENSION: USERS ────────────────────────────────────────
@@ -96,20 +113,34 @@ TABLES = {
 
     # ─── DIMENSION: DATE ─────────────────────────────────────────
     "dim_date": [
-        bigquery.SchemaField("date_key", "INT64", mode="REQUIRED",
-                             description="Khóa định dạng YYYYMMDD"),
-        bigquery.SchemaField("full_date", "DATE", mode="NULLABLE",
-                             description="Ngày tháng năm chuẩn"),
-        bigquery.SchemaField("day_of_week", "INT64", mode="NULLABLE",
-                             description="Thứ trong tuần (1=Mon … 7=Sun)"),
-        bigquery.SchemaField("is_weekend", "BOOL", mode="NULLABLE",
-                             description="TRUE nếu Thứ 7 hoặc CN"),
-        bigquery.SchemaField("month", "INT64", mode="NULLABLE",
+        bigquery.SchemaField("date_key",      "INT64",  mode="REQUIRED",
+                             description="Khóa YYYYMMDD - FK từ fact_transactions"),
+        bigquery.SchemaField("date",          "DATE",   mode="NULLABLE",
+                             description="Ngày tháng năm chuẩn (DATE)"),
+        bigquery.SchemaField("yyyymmdd",      "STRING", mode="NULLABLE",
+                             description="Ngày dạng string YYYYMMDD"),
+        bigquery.SchemaField("yyyy_mm_dd",    "STRING", mode="NULLABLE",
+                             description="Ngày dạng string YYYY-MM-DD"),
+        bigquery.SchemaField("year",          "INT64",  mode="NULLABLE",
+                             description="Năm (vd: 2026)"),
+        bigquery.SchemaField("quarter",       "INT64",  mode="NULLABLE",
+                             description="Quý trong năm (1-4)"),
+        bigquery.SchemaField("month_number",  "INT64",  mode="NULLABLE",
                              description="Tháng (1-12)"),
-        bigquery.SchemaField("quarter", "INT64", mode="NULLABLE",
-                             description="Quý (1-4)"),
-        bigquery.SchemaField("year", "INT64", mode="NULLABLE",
-                             description="Năm"),
+        bigquery.SchemaField("month_name",    "STRING", mode="NULLABLE",
+                             description="Tên tháng (January … December)"),
+        bigquery.SchemaField("year_month",    "STRING", mode="NULLABLE",
+                             description="Dạng YYYY-MM (vd: 2026-03)"),
+        bigquery.SchemaField("day",           "INT64",  mode="NULLABLE",
+                             description="Ngày trong tháng (1-31)"),
+        bigquery.SchemaField("weekday_number","INT64",  mode="NULLABLE",
+                             description="Thứ trong tuần (1=Mon … 7=Sun)"),
+        bigquery.SchemaField("weekday_name",  "STRING", mode="NULLABLE",
+                             description="Tên thứ (Monday … Sunday)"),
+        bigquery.SchemaField("is_weekend",    "BOOL",   mode="NULLABLE",
+                             description="TRUE nếu Thứ 7 hoặc Chủ nhật"),
+        bigquery.SchemaField("is_leap_year",  "BOOL",   mode="NULLABLE",
+                             description="TRUE nếu là năm nhuận"),
     ],
 }
 
@@ -118,10 +149,10 @@ def create_dataset(client: bigquery.Client) -> None:
     """Tạo dataset nếu chưa tồn tại."""
     dataset_ref = bigquery.Dataset(FULL_DATASET)
     dataset_ref.location = "US"
-    dataset_ref.description = "PaySim Data Warehouse – Star Schema (KLTN)"
+    dataset_ref.description = "PaySim Data Warehouse - Star Schema (KLTN)"
 
     dataset = client.create_dataset(dataset_ref, exists_ok=True)
-    print(f"✅ Dataset '{dataset.dataset_id}' sẵn sàng (location: {dataset.location})")
+    print(f"[DONE] Dataset '{dataset.dataset_id}' sẵn sàng (location: {dataset.location})")
 
 
 def create_tables(client: bigquery.Client) -> None:
@@ -137,25 +168,25 @@ def create_tables(client: bigquery.Client) -> None:
                 field="transaction_time",
             )
             table.clustering_fields = ["user_id", "merchant_id"]
-            table.description = "Bảng Fact – Lịch sử giao dịch & điểm thưởng"
+            table.description = "Bảng Fact - Lịch sử giao dịch & điểm thưởng"
         elif table_name == "dim_users":
-            table.description = "Dimension – Thông tin khách hàng"
+            table.description = "Dimension - Thông tin khách hàng"
         elif table_name == "dim_merchants":
-            table.description = "Dimension – Thông tin cửa hàng"
+            table.description = "Dimension - Thông tin cửa hàng"
         elif table_name == "dim_transaction_type":
-            table.description = "Dimension – Cấu hình loại giao dịch & luật thưởng"
+            table.description = "Dimension - Cấu hình loại giao dịch & luật thưởng"
         elif table_name == "dim_location":
-            table.description = "Dimension – Thông tin địa lý"
+            table.description = "Dimension - Thông tin địa lý"
         elif table_name == "dim_date":
-            table.description = "Dimension – Trục thời gian chuẩn"
+            table.description = "Dimension - Trục thời gian chuẩn"
 
         table = client.create_table(table, exists_ok=True)
-        print(f"  📋 Bảng '{table_name}' đã tạo ({len(schema)} cột)")
+        print(f"  [+] Bảng '{table_name}' đã tạo ({len(schema)} cột)")
 
 
 def main():
     print("=" * 60)
-    print("  BigQuery Star Schema – Khởi tạo Data Warehouse")
+    print("  BigQuery Star Schema - Khởi tạo Data Warehouse")
     print("=" * 60)
     print(f"  Project : {PROJECT_ID}")
     print(f"  Dataset : {DATASET_ID}")
@@ -167,11 +198,11 @@ def main():
     create_dataset(client)
 
     # 2. Tạo 6 bảng
-    print(f"\n📦 Tạo {len(TABLES)} bảng Star Schema:")
+    print(f"\n[INFO] Tạo {len(TABLES)} bảng Star Schema:")
     create_tables(client)
 
     print(f"\n{'='*60}")
-    print(f"✅ HOÀN TẤT! Đã tạo {len(TABLES)} bảng trong dataset '{DATASET_ID}'")
+    print(f"[DONE] HOÀN TẤT! Đã tạo {len(TABLES)} bảng trong dataset '{DATASET_ID}'")
     print(f"{'='*60}")
 
 
