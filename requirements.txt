@@ -1,7 +1,10 @@
 pandas
 kafka-python
 python-dotenv
-pyspark>=3.5.0
+pyspark==3.5.4
 kaggle
 google-cloud-bigquery>=3.0.0
 db-dtypes
+pandas-gbq
+psycopg2-binary
+sqlalchemy

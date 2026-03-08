@@ -69,9 +69,11 @@ def seed_dim_transaction_type(client: bigquery.Client) -> int:
         }
         for tid, name, eligible, multiplier in TRANSACTION_TYPES
     ]
-    errors = client.insert_rows_json(table_id, rows)
-    if errors:
-        print(f"  ❌ Lỗi insert dim_transaction_type: {errors}")
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+    job = client.load_table_from_dataframe(pd.DataFrame(rows), table_id, job_config=job_config)
+    job.result()
+    if job.errors:
+        print(f"  ❌ Lỗi insert dim_transaction_type: {job.errors}")
         return 0
     return len(rows)
 
@@ -83,9 +85,11 @@ def seed_dim_location(client: bigquery.Client) -> int:
         {"location_id": loc_id, "city": city, "region": region}
         for loc_id, city, region in LOCATIONS
     ]
-    errors = client.insert_rows_json(table_id, rows)
-    if errors:
-        print(f"  ❌ Lỗi insert dim_location: {errors}")
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+    job = client.load_table_from_dataframe(pd.DataFrame(rows), table_id, job_config=job_config)
+    job.result()
+    if job.errors:
+        print(f"  ❌ Lỗi insert dim_location: {job.errors}")
         return 0
     return len(rows)
 
@@ -111,14 +115,13 @@ def seed_dim_date(client: bigquery.Client, year: int = 2026) -> int:
         })
         current += timedelta(days=1)
 
-    # Insert theo batch 500 dòng (tránh payload quá lớn)
-    batch_size = 500
-    for i in range(0, len(rows), batch_size):
-        batch = rows[i:i + batch_size]
-        errors = client.insert_rows_json(table_id, batch)
-        if errors:
-            print(f"  ❌ Lỗi insert dim_date batch {i}: {errors}")
-            return 0
+    print(f"    📤 Nạp {len(rows):,} rows vào {table_id}...")
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+    job = client.load_table_from_dataframe(pd.DataFrame(rows), table_id, job_config=job_config)
+    job.result()
+    if job.errors:
+        print(f"  ❌ Lỗi insert dim_date: {job.errors}")
+        return 0
     return len(rows)
 
 
@@ -146,20 +149,14 @@ def seed_dim_users(client: bigquery.Client) -> int:
             "registration_date": (base_date + timedelta(days=random.randint(0, 730))).isoformat(),
         })
 
-    # Insert theo batch
-    batch_size = 500
-    total_inserted = 0
-    for i in range(0, len(rows), batch_size):
-        batch = rows[i:i + batch_size]
-        errors = client.insert_rows_json(table_id, batch)
-        if errors:
-            print(f"  ❌ Lỗi insert dim_users batch {i}: {errors[:3]}...")
-            return total_inserted
-        total_inserted += len(batch)
-        if total_inserted % 5000 == 0:
-            print(f"    📤 dim_users: {total_inserted:,} / {len(rows):,}")
-
-    return total_inserted
+    print(f"    📤 Nạp {len(rows):,} rows vào {table_id}...")
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+    job = client.load_table_from_dataframe(pd.DataFrame(rows), table_id, job_config=job_config)
+    job.result()
+    if job.errors:
+        print(f"  ❌ Lỗi insert dim_users: {job.errors}")
+        return 0
+    return len(rows)
 
 
 def seed_dim_merchants(client: bigquery.Client) -> int:
@@ -183,20 +180,14 @@ def seed_dim_merchants(client: bigquery.Client) -> int:
             "merchant_category": random.choice(MERCHANT_CATEGORIES),
         })
 
-    # Insert theo batch
-    batch_size = 500
-    total_inserted = 0
-    for i in range(0, len(rows), batch_size):
-        batch = rows[i:i + batch_size]
-        errors = client.insert_rows_json(table_id, batch)
-        if errors:
-            print(f"  ❌ Lỗi insert dim_merchants batch {i}: {errors[:3]}...")
-            return total_inserted
-        total_inserted += len(batch)
-        if total_inserted % 5000 == 0:
-            print(f"    📤 dim_merchants: {total_inserted:,} / {len(rows):,}")
-
-    return total_inserted
+    print(f"    📤 Nạp {len(rows):,} rows vào {table_id}...")
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+    job = client.load_table_from_dataframe(pd.DataFrame(rows), table_id, job_config=job_config)
+    job.result()
+    if job.errors:
+        print(f"  ❌ Lỗi insert dim_merchants: {job.errors}")
+        return 0
+    return len(rows)
 
 
 def main():

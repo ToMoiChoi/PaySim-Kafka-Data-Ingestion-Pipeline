@@ -34,6 +34,7 @@ services:
     container_name: spark_processor
     depends_on:
       - kafka
+      - postgres
     env_file:
       - .env
     environment:
@@ -41,7 +42,25 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       # BigQuery credentials (mount file bên dưới volumes)
       GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/service-account.json
+      # PostgreSQL (inside Docker network)
+      POSTGRES_HOST: postgres
     volumes:
       # Mount thư mục chứa Service Account JSON vào container
-      # Thay đổi path bên trái cho phù hợp với máy bạn
       - ./credentials:/app/credentials:ro
+      # Mount thư mục để Spark ghi Parquet backup cho BigQuery Load Job
+      - ./bq_backup:/tmp/bq_backup
+
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: paysim_dw
+      POSTGRES_USER: paysim
+      POSTGRES_PASSWORD: paysim123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

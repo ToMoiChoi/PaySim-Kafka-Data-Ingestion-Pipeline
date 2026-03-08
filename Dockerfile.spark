@@ -9,7 +9,7 @@ WORKDIR /app
 
 # Py4J Bind Fix & Load Packages
 ENV SPARK_LOCAL_IP=127.0.0.1
-ENV PYSPARK_SUBMIT_ARGS="--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.34.0 pyspark-shell"
+ENV PYSPARK_SUBMIT_ARGS="--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.7.3 pyspark-shell"
 
 # Install Python dependencies
 COPY requirements.txt .
@@ -19,4 +19,4 @@ RUN pip install -r requirements.txt
 COPY . .
 
 # Run the Spark application
-CMD ["python", "-u", "spark_processor.py"]
+CMD ["python", "-u", "processor/spark_processor.py"]

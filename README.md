@@ -43,13 +43,29 @@ dim_date ───────────┘
 | `dim_location` | Dim | Geographic information (10 Vietnamese cities) |
 | `dim_date` | Dim | Standard date dimension (year 2026) |
 
+### Week 4: Pipeline Sink – Spark → BigQuery UPSERT (Sprint 2)
+1. **Micro-batch trigger:** `spark_processor.py` writes every **15 seconds** via `foreachBatch`.
+2. **UPSERT via BigQuery MERGE:**
+   - Each batch → written to `fact_transactions_staging` (overwrite).
+   - A `MERGE` SQL runs: `WHEN MATCHED → UPDATE`, `WHEN NOT MATCHED → INSERT`.
+   - Prevents duplicates even if Watermark misses a late event.
+3. **Per-batch logging:** `batch_id`, `rows_in_batch`, `rows_affected`, `latency_ms`.
+4. **Reconciliation:** `bq_reconcile.py` compares Kafka total messages vs BigQuery row count.
+
+```
+Kafka Offsets (end - begin) ──→ bq_reconcile.py ←── COUNT(*) BigQuery
+                                       ↓
+                              Match % ≥ 90% ? → PASS / FAIL
+```
+
 ## Prerequisites
 
-- Python 3.8+
+- Python 3.10+
 - Docker & Docker Compose
 - Kaggle account (to download the dataset)
 - Google Cloud account with BigQuery API enabled
 - Service Account JSON with `BigQuery Data Editor` + `BigQuery Job User` roles
+- *(Sprint 2)* A GCS bucket for spark-bigquery-connector temp staging
 
 ## Project Structure
 
@@ -62,10 +78,12 @@ KLTN_2/
 ├── .env                                         # Environment variables (git ignored)
 ├── docker-compose.yml                           # Kafka, Zookeeper, Spark Docker config
 ├── Dockerfile.spark                             # Spark container image
+├── Makefile                                     # Sprint 2: Automation commands
 ├── kafka_producer.py                            # Week 1: CSV → Kafka Producer
-├── spark_processor.py                           # Week 2: Kafka → Spark → BigQuery
+├── spark_processor.py                           # Weeks 2-4: Kafka → Spark → BigQuery (UPSERT)
 ├── bigquery_schema.py                           # Week 3: Create Star Schema on BQ
 ├── seed_dimensions.py                           # Week 3: Seed Dimension tables
+├── bq_reconcile.py                              # Week 4: Data reconciliation (Kafka vs BQ)
 ├── download_dataset.py                          # Script to download dataset from Kaggle
 ├── requirements.txt                             # Python dependencies
 └── README.md
@@ -115,7 +133,14 @@ DUPLICATE_RATIO=0.10
 BQ_PROJECT_ID=your-gcp-project-id
 BQ_DATASET=paysim_dw
 GOOGLE_APPLICATION_CREDENTIALS=credentials/service-account.json
+
+# Sprint 2: GCS temp bucket for spark-bigquery-connector (no gs:// prefix)
+BQ_TEMP_BUCKET=your-gcs-bucket-name
+RECONCILE_THRESHOLD=0.90
 ```
+
+> **Note:** Create a GCS bucket in the same region as your BigQuery dataset.
+> Grant the service account `Storage Object Admin` on that bucket.
 
 ### Step 4: Set Up BigQuery Star Schema
 
@@ -143,11 +168,33 @@ python spark_processor.py
 docker-compose up spark-processor
 ```
 
-### Step 7: Verify Data on BigQuery
+### Step 7: Reconcile & Verify Data
 
-Open [BigQuery Console](https://console.cloud.google.com/bigquery) → select dataset `paysim_dw`:
-```sql
-SELECT * FROM paysim_dw.fact_transactions LIMIT 10;
+```powershell
+# Check BigQuery rows vs Kafka messages
+python bq_reconcile.py
+```
+
+Expected output:
+```
+┌───────────────────────────────────────────────────────────────┐
+│  Kafka Messages Produced              │        52,384  │
+│  BigQuery fact_transactions rows      │        49,102  │
+│  Match Percentage                     │         93.72 %│
+│  Status                              │  ✅ PASS         │
+└───────────────────────────────────────────────────────────────┘
+```
+
+### Using Makefile (recommended)
+
+```powershell
+make help          # Show all available commands
+make start-kafka   # Start Kafka + Zookeeper
+make setup-bq      # Create BigQuery schema
+make seed-bq       # Seed dimension tables
+make run-producer  # Start Kafka producer
+make run-spark     # Start Spark processor (BigQuery sink)
+make reconcile     # Check data match
 ```
 
 ## Configuration
