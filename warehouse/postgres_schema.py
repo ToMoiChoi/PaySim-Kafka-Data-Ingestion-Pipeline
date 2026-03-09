@@ -59,6 +59,26 @@ DDL_STATEMENTS = [
     );
     """,
 
+    # ── dim_time ─────────────────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS dim_time (
+        time_key         BIGINT PRIMARY KEY,
+        hour             INTEGER,
+        minute           INTEGER,
+        time_of_day      VARCHAR(20),
+        is_business_hour BOOLEAN
+    );
+    """,
+
+    # ── dim_channel ──────────────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS dim_channel (
+        channel_id   VARCHAR(20) PRIMARY KEY,
+        channel_name VARCHAR(50),
+        device_os    VARCHAR(50)
+    );
+    """,
+
     # ── dim_users ────────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS dim_users (
@@ -66,6 +86,18 @@ DDL_STATEMENTS = [
         account_balance   NUMERIC(20, 2),
         user_segment      VARCHAR(20),
         registration_date DATE
+    );
+    """,
+
+    # ── dim_account ──────────────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS dim_account (
+        account_id     VARCHAR(50) PRIMARY KEY,
+        user_id        VARCHAR(50),
+        account_type   VARCHAR(50),
+        account_status VARCHAR(20),
+        created_date   DATE,
+        CONSTRAINT fk_account_user FOREIGN KEY (user_id) REFERENCES dim_users(user_id)
     );
     """,
 
@@ -82,11 +114,13 @@ DDL_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS fact_transactions (
         transaction_id   VARCHAR(50) PRIMARY KEY,
-        user_id          VARCHAR(50),
+        account_id       VARCHAR(50),
         merchant_id      VARCHAR(50),
         type_id          VARCHAR(20),
         location_id      VARCHAR(20),
+        channel_id       VARCHAR(20),
         date_key         BIGINT,
+        time_key         BIGINT,
         transaction_time TIMESTAMP,
         amount           NUMERIC(20, 2),
         reward_points    BIGINT,
@@ -97,14 +131,23 @@ DDL_STATEMENTS = [
         "oldbalanceDest" NUMERIC(20, 2),
         "newbalanceDest" NUMERIC(20, 2),
         "isFraud"        INTEGER,
-        "isFlaggedFraud" INTEGER
+        "isFlaggedFraud" INTEGER,
+        ip_address       VARCHAR(50),
+        CONSTRAINT fk_account FOREIGN KEY (account_id) REFERENCES dim_account(account_id),
+        CONSTRAINT fk_merchant FOREIGN KEY (merchant_id) REFERENCES dim_merchants(merchant_id),
+        CONSTRAINT fk_type FOREIGN KEY (type_id) REFERENCES dim_transaction_type(type_id),
+        CONSTRAINT fk_location FOREIGN KEY (location_id) REFERENCES dim_location(location_id),
+        CONSTRAINT fk_channel FOREIGN KEY (channel_id) REFERENCES dim_channel(channel_id),
+        CONSTRAINT fk_date FOREIGN KEY (date_key) REFERENCES dim_date(date_key),
+        CONSTRAINT fk_time FOREIGN KEY (time_key) REFERENCES dim_time(time_key)
     );
     """,
 
     # ── Indexes ──────────────────────────────────────────────────
-    "CREATE INDEX IF NOT EXISTS idx_fact_user    ON fact_transactions(user_id);",
+    "CREATE INDEX IF NOT EXISTS idx_fact_account ON fact_transactions(account_id);",
     "CREATE INDEX IF NOT EXISTS idx_fact_merchant ON fact_transactions(merchant_id);",
-    "CREATE INDEX IF NOT EXISTS idx_fact_time    ON fact_transactions(transaction_time);",
+    "CREATE INDEX IF NOT EXISTS idx_fact_time ON fact_transactions(transaction_time);",
+    "CREATE INDEX IF NOT EXISTS idx_fact_date ON fact_transactions(date_key);",
 ]
 
 
@@ -123,8 +166,8 @@ def main():
             conn.execute(text(stmt))
 
     print("[DONE] HOÀN TẤT! Star Schema đã tạo trong PostgreSQL:")
-    print("   fact_transactions, dim_users, dim_merchants,")
-    print("   dim_transaction_type, dim_location, dim_date")
+    print("   fact_transactions, dim_users, dim_account, dim_merchants,")
+    print("   dim_transaction_type, dim_location, dim_date, dim_time, dim_channel")
     print("=" * 60)
 
 

@@ -36,7 +36,7 @@ RETRY_INTERVAL_SEC  = int(os.getenv("RETRY_INTERVAL_SEC", "5"))
 
 
 def load_and_transform(csv_path: str) -> pd.DataFrame:
-    """Đọc CSV, lọc PAYMENT, thêm transaction_id & event_timestamp."""
+    """Đọc CSV, lọc PAYMENT, thêm transaction_id, event_timestamp & mock data."""
     print(f"[1/4] Đọc file CSV: {csv_path}")
     df = pd.read_csv(csv_path)
     total_rows = len(df)
@@ -52,8 +52,19 @@ def load_and_transform(csv_path: str) -> pd.DataFrame:
 
     # Gán event_timestamp = thời gian hiện tại
     df["event_timestamp"] = datetime.now(timezone.utc).isoformat()
+    
+    # --- MOCK DATA FOR NEW DIMENSIONS ---
+    # 1. account_id: Lấy nameOrig (user_id) + "_ACC1"
+    df["account_id"] = df["nameOrig"] + "_ACC1"
+    
+    # 2. channel_id: Random từ danh sách tĩnh
+    CHANNELS = ["CHN_APP_IOS", "CHN_APP_AND", "CHN_WEB", "CHN_ATM", "CHN_POS"]
+    df["channel_id"] = random.choices(CHANNELS, k=len(df))
+    
+    # 3. ip_address: Sinh IP ngẫu nhiên
+    df["ip_address"] = [f"{random.randint(1,255)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,255)}" for _ in range(len(df))]
 
-    print(f"      Đã thêm cột transaction_id & event_timestamp")
+    print(f"      Đã thêm mock data: transaction_id, event_timestamp, account_id, channel_id, ip_address")
     return df
 
 

@@ -88,11 +88,23 @@ payment_schema = StructType([
     StructField("isFlaggedFraud",  IntegerType(), True),
     StructField("transaction_id",  StringType(),  True),
     StructField("event_timestamp", StringType(),  True),
+    StructField("account_id",      StringType(),  True),
+    StructField("channel_id",      StringType(),  True),
+    StructField("ip_address",      StringType(),  True),
 ])
 
 
 # ─── Spark Session ───────────────────────────────────────────────
 def create_spark_session() -> SparkSession:
+    # Set Hadoop Home for Windows environment explicitly
+    os.environ["HADOOP_HOME"] = r"C:\hadoop"
+    # To fix potential Winutils missing dll error:
+    import sys
+    if sys.platform.startswith('win'):
+        os.environ['PATH'] = os.environ['PATH'] + ';' + r'C:\hadoop\bin'
+        # Fix BlockManager null pointer exception on Windows 
+        os.environ["SPARK_LOCAL_IP"] = "127.0.0.1"
+
     builder = (
         SparkSession.builder
         .appName("PaySim_DualSink_Streaming")
@@ -103,8 +115,8 @@ def create_spark_session() -> SparkSession:
             "org.postgresql:postgresql:42.7.3"
         )
         .config("spark.sql.shuffle.partitions", "2")
-        .config("spark.driver.memory", "1g")  # <-- Giảm từ 4g xuống 1g để tối ưu RAM
-        .config("spark.executor.memory", "1g") # <-- Giảm từ 4g xuống 1g
+        .config("spark.driver.memory", "3g")  # <-- Tăng lên 3g để chứa broadcast dim_users
+        .config("spark.executor.memory", "3g") # <-- Tăng lên 3g
         .config("spark.memory.fraction", "0.6") # Giữ heap memory gọn nhẹ
         .config("spark.sql.execution.arrow.pyspark.enabled", "true") # Tăng tốc xử lý Pandas/UDF
     )
@@ -112,27 +124,40 @@ def create_spark_session() -> SparkSession:
     return builder.getOrCreate()
 
 
-# ─── Transform: Kafka DF -> fact schema ──────────────────────────
-def build_fact_df(parsed_df: DataFrame) -> DataFrame:
+def build_fact_df(spark: SparkSession, parsed_df: DataFrame) -> DataFrame:
 
-    @udf(returnType=StringType())
-    def random_location_udf():
-        return random.choice(LOCATION_IDS)
-
+    # 1. Cast event_timestamp string to native TimestampType
     typed_df = parsed_df.withColumn(
         "event_timestamp", expr("to_timestamp(event_timestamp)")
     )
 
+    # 2. Watermark & Drop Duplicates (Stateful Streaming)
+    # Khử trùng lặp các giao dịch gửi đúp (cùng transaction_id) trong window 5 phút
     clean_df = (
         typed_df
         .withWatermark("event_timestamp", "5 minutes")
         .dropDuplicates(["transaction_id"])
     )
 
-    fact_df = (
+    # 3. Data Formatting & Type Casting
+    base_df = (
         clean_df
         .withColumnRenamed("nameOrig",  "user_id")
         .withColumnRenamed("nameDest",  "merchant_id")
+        .withColumn("transaction_time",
+            when(col("event_timestamp").isNull(), current_timestamp())
+            .otherwise(col("event_timestamp"))
+        )
+        # Sinh date_key (yyyyMMdd)
+        .withColumn("date_key", date_format(col("transaction_time"), "yyyyMMdd").cast("long"))
+        # Sinh time_key (Thí dụ 14:30 -> 1430)
+        .withColumn("time_key", (expr("hour(transaction_time)") * 100 + expr("minute(transaction_time)")).cast("long"))
+        .withColumn("amount",          col("amount").cast("decimal(38,9)"))
+        .withColumn("oldbalanceOrg",   col("oldbalanceOrg").cast("decimal(38,9)"))
+        .withColumn("newbalanceOrig",  col("newbalanceOrig").cast("decimal(38,9)"))
+        .withColumn("oldbalanceDest",  col("oldbalanceDest").cast("decimal(38,9)"))
+        .withColumn("newbalanceDest",  col("newbalanceDest").cast("decimal(38,9)"))
+        # Mock Type ID tạm nếu cần
         .withColumn("type_id",
             when(col("type") == "PAYMENT",  "TYP_PAYMENT")
             .when(col("type") == "TRANSFER","TYP_TRANSFER")
@@ -141,29 +166,63 @@ def build_fact_df(parsed_df: DataFrame) -> DataFrame:
             .when(col("type") == "CASH_IN", "TYP_CASH_IN")
             .otherwise("TYP_PAYMENT")
         )
-        .withColumn("location_id",      random_location_udf())
-        .withColumn("transaction_time",
-            when(col("event_timestamp").isNull(), current_timestamp())
-            .otherwise(col("event_timestamp"))
-        )
-        .withColumn("date_key",
-            date_format(col("transaction_time"), "yyyyMMdd").cast("long")
-        )
-        .withColumn("amount",          col("amount").cast("decimal(38,9)"))
-        .withColumn("reward_points",   (col("amount") * 0.01).cast("long"))
-        .withColumn("oldbalanceOrg",   col("oldbalanceOrg").cast("decimal(38,9)"))
-        .withColumn("newbalanceOrig",  col("newbalanceOrig").cast("decimal(38,9)"))
-        .withColumn("oldbalanceDest",  col("oldbalanceDest").cast("decimal(38,9)"))
-        .withColumn("newbalanceDest",  col("newbalanceDest").cast("decimal(38,9)"))
-        .select(
-            "transaction_id", "user_id", "merchant_id",
-            "type_id", "location_id", "date_key",
-            "transaction_time", "amount", "reward_points",
-            "type", "step", "oldbalanceOrg", "newbalanceOrig",
-            "oldbalanceDest", "newbalanceDest", "isFraud", "isFlaggedFraud"
-        )
     )
-    return fact_df
+
+    # 4. Stream-Static Joins (Tích hợp Dữ liệu Tham chiếu)
+    # Lấy thông tin Hạng người dùng (User Segment) từ PostgreSQL
+    dim_users = (
+        spark.read.format("jdbc")
+        .option("url", PG_JDBC_URL).option("dbtable", "dim_users")
+        .option("user", PG_USER).option("password", PG_PASSWORD)
+        .option("driver", "org.postgresql.Driver").load()
+        .select("user_id", "user_segment")
+    )
+    
+    # Lấy thông tin Hệ số Thưởng của Loại giao dịch (Reward Multiplier)
+    dim_txn_type = (
+        spark.read.format("jdbc")
+        .option("url", PG_JDBC_URL).option("dbtable", "dim_transaction_type")
+        .option("user", PG_USER).option("password", PG_PASSWORD)
+        .option("driver", "org.postgresql.Driver").load()
+        .select("type_id", "reward_multiplier")
+    )
+
+    # Nối (Join) luồng stream với batch data
+    joined_df = base_df.join(dim_users, on="user_id", how="left")
+    joined_df = joined_df.join(dim_txn_type, on="type_id", how="left")
+
+    # 5. Logic Nghiệp vụ Core: Tính Điểm Thưởng (Reward Points Calculation)
+    # Điểm thưởng = Số tiền * Hệ số loại GD * Hệ số hạng khách hàng
+    # Standard x1, Gold x1.5, Diamond x2
+    fact_df = joined_df.withColumn(
+        "user_multiplier",
+        when(col("user_segment") == "Diamond", 2.0)
+        .when(col("user_segment") == "Gold", 1.5)
+        .otherwise(1.0)
+    ).withColumn(
+        "reward_points",
+        (col("amount") * col("reward_multiplier") * col("user_multiplier")).cast("long")
+    )
+
+    # 6. Gán Location ngẫu nhiên (chỉ để phục vụ Map Dashboard nếu chưa có trong source)
+    from pyspark.sql.functions import array, lit, rand, floor
+    
+    # Create an array column of location IDs
+    loc_array = array(*[lit(loc) for loc in LOCATION_IDS])
+    loc_count = len(LOCATION_IDS)
+    
+    final_fact_df = fact_df.withColumn(
+        "location_id", 
+        loc_array.getItem(floor(rand() * loc_count).cast("int"))
+    ).select(
+        "transaction_id", "account_id", "merchant_id",
+        "type_id", "location_id", "channel_id", "date_key", "time_key",
+        "transaction_time", "amount", "reward_points",
+        "type", "step", "oldbalanceOrg", "newbalanceOrig",
+        "oldbalanceDest", "newbalanceDest", "isFraud", "isFlaggedFraud", "ip_address"
+    )
+
+    return final_fact_df
 
 
 # ─── Sink 1: PostgreSQL (Primary, real-time) ─────────────────────
@@ -202,22 +261,25 @@ def write_to_postgres(batch_df: DataFrame, batch_id: int, row_count: int):
             INSERT INTO fact_transactions
                 SELECT * FROM {staging}
             ON CONFLICT (transaction_id) DO UPDATE SET
-                user_id          = EXCLUDED.user_id,
+                account_id       = EXCLUDED.account_id,
                 merchant_id      = EXCLUDED.merchant_id,
                 type_id          = EXCLUDED.type_id,
-                type             = EXCLUDED.type,
                 location_id      = EXCLUDED.location_id,
+                channel_id       = EXCLUDED.channel_id,
                 date_key         = EXCLUDED.date_key,
+                time_key         = EXCLUDED.time_key,
                 transaction_time = EXCLUDED.transaction_time,
                 amount           = EXCLUDED.amount,
                 reward_points    = EXCLUDED.reward_points,
+                type             = EXCLUDED.type,
                 step             = EXCLUDED.step,
                 "oldbalanceOrg"  = EXCLUDED."oldbalanceOrg",
                 "newbalanceOrig" = EXCLUDED."newbalanceOrig",
                 "oldbalanceDest" = EXCLUDED."oldbalanceDest",
                 "newbalanceDest" = EXCLUDED."newbalanceDest",
                 "isFraud"        = EXCLUDED."isFraud",
-                "isFlaggedFraud" = EXCLUDED."isFlaggedFraud"
+                "isFlaggedFraud" = EXCLUDED."isFlaggedFraud",
+                ip_address       = EXCLUDED.ip_address
         """)
         cur.execute(f"TRUNCATE TABLE {staging}")
     conn.commit()
@@ -351,8 +413,8 @@ def main():
         .select("data.*")
     )
 
-    # 3. Transform
-    fact_df = build_fact_df(parsed_df)
+    # 3. Transform & Stream-Static Join
+    fact_df = build_fact_df(spark, parsed_df)
 
     # 4. Dual Sink via foreachBatch
     query = (
