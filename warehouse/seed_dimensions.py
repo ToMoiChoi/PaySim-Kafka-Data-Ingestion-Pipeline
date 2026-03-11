@@ -31,71 +31,29 @@ if not PROJECT_ID:
 
 FULL_DATASET = f"{PROJECT_ID}.{DATASET_ID}"
 
-# ─── Seed Constants ──────────────────────────────────────────────
-MERCHANT_CATEGORIES = ["F&B", "E-commerce", "Bill Payment", "Travel", "Entertainment"]
-USER_SEGMENTS = ["Standard", "Gold", "Diamond"]
-SEGMENT_WEIGHTS = [0.60, 0.30, 0.10]
+import json
 
-LOCATIONS = [
-    # ─ Bắc ─────────────────────────────────────────────────────
-    ("LOC_VN_HNI", "Hà Nội",             "Bắc"),
-    ("LOC_VN_HPG", "Hải Phòng",           "Bắc"),
-    ("LOC_VN_HGG", "Hà Giang",             "Bắc"),
-    ("LOC_VN_CBG", "Cao Bằng",             "Bắc"),
-    ("LOC_VN_LCI", "Lào Cai",              "Bắc"),
-    ("LOC_VN_LSN", "Lạng Sơn",             "Bắc"),
-    ("LOC_VN_TQG", "Tuyên Quang",           "Bắc"),
-    ("LOC_VN_TNG", "Thái Nguyên",           "Bắc"),
-    ("LOC_VN_BGG", "Bắc Giang",             "Bắc"),
-    ("LOC_VN_PTH", "Phú Thọ",              "Bắc"),
-    ("LOC_VN_BNH", "Bắc Ninh",             "Bắc"),
-    ("LOC_VN_HYN", "Hưng Yên",             "Bắc"),
-    ("LOC_VN_HDG", "Hải Dương",            "Bắc"),
-    ("LOC_VN_NDH", "Nam Định",             "Bắc"),
-    # ─ Trung ───────────────────────────────────────────────
-    ("LOC_VN_THA", "Thanh Hóa",             "Trung"),
-    ("LOC_VN_NAN", "Nghệ An",              "Trung"),
-    ("LOC_VN_HTH", "Hà Tĩnh",              "Trung"),
-    ("LOC_VN_DNG", "Đà Nẵng",              "Trung"),
-    ("LOC_VN_HUE", "Thừa Thiên-Huế",       "Trung"),
-    ("LOC_VN_QNM", "Quảng Nam",             "Trung"),
-    ("LOC_VN_QNG", "Quảng Ngãi",            "Trung"),
-    ("LOC_VN_BDH", "Bình Định",             "Trung"),
-    ("LOC_VN_PYN", "Phú Yên",              "Trung"),
-    ("LOC_VN_KHA", "Khánh Hòa",             "Trung"),
-    ("LOC_VN_DLK", "Đắk Lậk",              "Trung"),
-    ("LOC_VN_LDG", "Lâm Đồng",              "Trung"),
-    # ─ Nam ─────────────────────────────────────────────────────
-    ("LOC_VN_HCM", "TP. Hồ Chí Minh",      "Nam"),
-    ("LOC_VN_CTH", "Cần Thơ",              "Nam"),
-    ("LOC_VN_BPC", "Bình Phước",            "Nam"),
-    ("LOC_VN_TNH", "Tây Ninh",              "Nam"),
-    ("LOC_VN_BDG", "Bình Dương",            "Nam"),
-    ("LOC_VN_DNI", "Đồng Nai",              "Nam"),
-    ("LOC_VN_BVT", "Bà Rịa-Vũng Tàu",      "Nam"),
-]
+def load_seed_data() -> dict:
+    with open("data/dimension_seed.json", "r", encoding="utf-8") as f:
+        return json.load(f)
 
-TRANSACTION_TYPES = [
-    ("TYP_PAYMENT",  "Payment",  True,  1.0),
-    ("TYP_TRANSFER", "Transfer", False, 0.0),
-    ("TYP_CASH_OUT", "Cash Out", False, 0.0),
-    ("TYP_DEBIT",    "Debit",    True,  0.5),
-    ("TYP_CASH_IN",  "Cash In",  False, 0.0),
-]
+SEED_DATA = load_seed_data()
+
+MERCHANT_CATEGORIES = SEED_DATA["MERCHANT_CATEGORIES"]
+USER_SEGMENTS = SEED_DATA["USER_SEGMENTS"]
+SEGMENT_WEIGHTS = SEED_DATA["SEGMENT_WEIGHTS"]
+LOCATIONS = SEED_DATA["LOCATIONS"]
+TRANSACTION_TYPES = SEED_DATA["TRANSACTION_TYPES"]
+CHANNELS = SEED_DATA["CHANNELS"]
+ACCOUNT_TYPES = SEED_DATA["ACCOUNT_TYPES"]
+ACCOUNT_STATUSES = SEED_DATA["ACCOUNT_STATUSES"]
+ACCOUNT_STAT_W = SEED_DATA["ACCOUNT_STAT_W"]
 
 
 def seed_dim_transaction_type(client: bigquery.Client) -> int:
     """Nạp 5 loại giao dịch cố định."""
     table_id = f"{FULL_DATASET}.dim_transaction_type"
-    rows = [
-        {
-            "type_id": tid,
-            "type_name": name,
-            "is_reward_eligible": eligible,
-            "reward_multiplier": multiplier,
-        }
-        for tid, name, eligible, multiplier in TRANSACTION_TYPES
-    ]
+    rows = TRANSACTION_TYPES
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
     job = client.load_table_from_dataframe(pd.DataFrame(rows), table_id, job_config=job_config)
     job.result()
@@ -108,10 +66,7 @@ def seed_dim_transaction_type(client: bigquery.Client) -> int:
 def seed_dim_location(client: bigquery.Client) -> int:
     """Nạp 10 thành phố Việt Nam."""
     table_id = f"{FULL_DATASET}.dim_location"
-    rows = [
-        {"location_id": loc_id, "city": city, "region": region}
-        for loc_id, city, region in LOCATIONS
-    ]
+    rows = LOCATIONS
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
     job = client.load_table_from_dataframe(pd.DataFrame(rows), table_id, job_config=job_config)
     job.result()
@@ -165,8 +120,56 @@ def seed_dim_date(client: bigquery.Client, start_year: int = 2025, end_year: int
     return len(rows)
 
 
+def seed_dim_time(client: bigquery.Client) -> int:
+    """Nạp 1440 phút trong ngày."""
+    table_id = f"{FULL_DATASET}.dim_time"
+    rows = []
+    for h in range(24):
+        for m in range(60):
+            time_key = h * 100 + m
+            if 5 <= h < 11:
+                tod = "Morning"
+            elif 11 <= h < 14:
+                tod = "Noon"
+            elif 14 <= h < 18:
+                tod = "Afternoon"
+            elif 18 <= h < 22:
+                tod = "Evening"
+            else:
+                tod = "Night"
+            is_biz = (8 <= h < 17)
+            rows.append({
+                "time_key": time_key,
+                "hour": h,
+                "minute": m,
+                "time_of_day": tod,
+                "is_business_hour": is_biz
+            })
+    print(f"    [SEND] Nạp {len(rows):,} rows vào {table_id}...")
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+    job = client.load_table_from_dataframe(pd.DataFrame(rows), table_id, job_config=job_config)
+    job.result()
+    if job.errors:
+        print(f"  [ERRO] Lỗi insert dim_time: {job.errors}")
+        return 0
+    return len(rows)
 
-def seed_dim_users(client: bigquery.Client) -> int:
+
+def seed_dim_channel(client: bigquery.Client) -> int:
+    """Nạp 5 kênh giao dịch."""
+    table_id = f"{FULL_DATASET}.dim_channel"
+    rows = CHANNELS
+    print(f"    [SEND] Nạp {len(rows):,} rows vào {table_id}...")
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+    job = client.load_table_from_dataframe(pd.DataFrame(rows), table_id, job_config=job_config)
+    job.result()
+    if job.errors:
+        print(f"  [ERRO] Lỗi insert dim_channel: {job.errors}")
+        return 0
+    return len(rows)
+
+
+def seed_dim_users(client: bigquery.Client):
     """Trích unique nameOrig từ PaySim CSV, gán segment & balance."""
     table_id = f"{FULL_DATASET}.dim_users"
 
@@ -196,6 +199,31 @@ def seed_dim_users(client: bigquery.Client) -> int:
     job.result()
     if job.errors:
         print(f"  [ERRO] Lỗi insert dim_users: {job.errors}")
+        return 0, pd.DataFrame()
+    return len(rows), users
+
+
+def seed_dim_account(client: bigquery.Client, users_df: pd.DataFrame) -> int:
+    """Nạp account cho mock users."""
+    table_id = f"{FULL_DATASET}.dim_account"
+    rows = []
+    base_date = date(2024, 1, 1)
+    for uid in users_df["user_id"]:
+        num_accounts = random.choices([1, 2], weights=[0.8, 0.2])[0]
+        for i in range(1, num_accounts + 1):
+            rows.append({
+                "account_id": f"{uid}_ACC{i}",
+                "user_id": uid,
+                "account_type": random.choice(ACCOUNT_TYPES),
+                "account_status": random.choices(ACCOUNT_STATUSES, weights=ACCOUNT_STAT_W)[0],
+                "created_date": (base_date + timedelta(days=random.randint(0, 730))),
+            })
+    print(f"    [SEND] Nạp {len(rows):,} rows vào {table_id}...")
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+    job = client.load_table_from_dataframe(pd.DataFrame(rows), table_id, job_config=job_config)
+    job.result()
+    if job.errors:
+        print(f"  [ERRO] Lỗi insert dim_account: {job.errors}")
         return 0
     return len(rows)
 
@@ -252,15 +280,28 @@ def main():
     results["dim_location"] = seed_dim_location(client)
 
     # 3. dim_date
-    print("[STEP] [3/5] Seeding dim_date (2025 -> 2030)...")
+    print("[STEP] [3/8] Seeding dim_date (2025 -> 2030)...")
     results["dim_date"] = seed_dim_date(client, start_year=2025, end_year=2030)
 
-    # 4. dim_users (cần đọc CSV)
-    print("[STEP] [4/5] Seeding dim_users...")
-    results["dim_users"] = seed_dim_users(client)
+    # 4. dim_time
+    print("[STEP] [4/8] Seeding dim_time...")
+    results["dim_time"] = seed_dim_time(client)
 
-    # 5. dim_merchants (cần đọc CSV)
-    print("[STEP] [5/5] Seeding dim_merchants...")
+    # 5. dim_channel
+    print("[STEP] [5/8] Seeding dim_channel...")
+    results["dim_channel"] = seed_dim_channel(client)
+
+    # 6. dim_users (cần đọc CSV)
+    print("[STEP] [6/8] Seeding dim_users...")
+    count_users, users_df = seed_dim_users(client)
+    results["dim_users"] = count_users
+
+    # 7. dim_account
+    print("[STEP] [7/8] Seeding dim_account...")
+    results["dim_account"] = seed_dim_account(client, users_df)
+
+    # 8. dim_merchants (cần đọc CSV)
+    print("[STEP] [8/8] Seeding dim_merchants...")
     results["dim_merchants"] = seed_dim_merchants(client)
 
     # Tổng kết

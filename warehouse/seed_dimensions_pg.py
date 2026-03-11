@@ -26,67 +26,23 @@ CSV_PATH    = os.getenv("CSV_PATH", "data/PS_20174392719_1491204439457_log.csv")
 
 DATABASE_URL = f"postgresql+psycopg2://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 
-MERCHANT_CATEGORIES = ["F&B", "E-commerce", "Bill Payment", "Travel", "Entertainment"]
-USER_SEGMENTS       = ["Standard", "Gold", "Diamond"]
-SEGMENT_WEIGHTS     = [0.60, 0.30, 0.10]
-ACCOUNT_TYPES       = ["Debit Card", "Credit Card", "E-Wallet", "Bank Account"]
-ACCOUNT_STATUSES    = ["Active", "Locked", "Pending"]
-ACCOUNT_STAT_W      = [0.90, 0.05, 0.05]
+import json
 
-LOCATIONS = [
-    # ─ Bắc ─────────────────────────────────────────────────────
-    ("LOC_VN_HNI", "Hà Nội",             "Bắc"),
-    ("LOC_VN_HPG", "Hải Phòng",           "Bắc"),
-    ("LOC_VN_HGG", "Hà Giang",             "Bắc"),
-    ("LOC_VN_CBG", "Cao Bằng",             "Bắc"),
-    ("LOC_VN_LCI", "Lào Cai",              "Bắc"),
-    ("LOC_VN_LSN", "Lạng Sơn",             "Bắc"),
-    ("LOC_VN_TQG", "Tuyên Quang",           "Bắc"),
-    ("LOC_VN_TNG", "Thái Nguyên",           "Bắc"),
-    ("LOC_VN_BGG", "Bắc Giang",             "Bắc"),
-    ("LOC_VN_PTH", "Phú Thọ",              "Bắc"),
-    ("LOC_VN_BNH", "Bắc Ninh",             "Bắc"),
-    ("LOC_VN_HYN", "Hưng Yên",             "Bắc"),
-    ("LOC_VN_HDG", "Hải Dương",            "Bắc"),
-    ("LOC_VN_NDH", "Nam Định",             "Bắc"),
-    # ─ Trung ───────────────────────────────────────────────
-    ("LOC_VN_THA", "Thanh Hóa",             "Trung"),
-    ("LOC_VN_NAN", "Nghệ An",              "Trung"),
-    ("LOC_VN_HTH", "Hà Tĩnh",              "Trung"),
-    ("LOC_VN_DNG", "Đà Nẵng",              "Trung"),
-    ("LOC_VN_HUE", "Thừa Thiên-Huế",       "Trung"),
-    ("LOC_VN_QNM", "Quảng Nam",             "Trung"),
-    ("LOC_VN_QNG", "Quảng Ngãi",            "Trung"),
-    ("LOC_VN_BDH", "Bình Định",             "Trung"),
-    ("LOC_VN_PYN", "Phú Yên",              "Trung"),
-    ("LOC_VN_KHA", "Khánh Hòa",             "Trung"),
-    ("LOC_VN_DLK", "Đắk Lậk",              "Trung"),
-    ("LOC_VN_LDG", "Lâm Đồng",              "Trung"),
-    # ─ Nam ─────────────────────────────────────────────────────
-    ("LOC_VN_HCM", "TP. Hồ Chí Minh",      "Nam"),
-    ("LOC_VN_CTH", "Cần Thơ",              "Nam"),
-    ("LOC_VN_BPC", "Bình Phước",            "Nam"),
-    ("LOC_VN_TNH", "Tây Ninh",              "Nam"),
-    ("LOC_VN_BDG", "Bình Dương",            "Nam"),
-    ("LOC_VN_DNI", "Đồng Nai",              "Nam"),
-    ("LOC_VN_BVT", "Bà Rịa-Vũng Tàu",      "Nam"),
-]
+def load_seed_data() -> dict:
+    with open("data/dimension_seed.json", "r", encoding="utf-8") as f:
+        return json.load(f)
 
-TRANSACTION_TYPES = [
-    ("TYP_PAYMENT",  "Payment",  True,  1.0),
-    ("TYP_TRANSFER", "Transfer", False, 0.0),
-    ("TYP_CASH_OUT", "Cash Out", False, 0.0),
-    ("TYP_DEBIT",    "Debit",    True,  0.5),
-    ("TYP_CASH_IN",  "Cash In",  False, 0.0),
-]
+SEED_DATA = load_seed_data()
 
-CHANNELS = [
-    ("CHN_APP_IOS", "Mobile App - iOS", "iOS"),
-    ("CHN_APP_AND", "Mobile App - Android", "Android"),
-    ("CHN_WEB", "Web Portal", "Windows/macOS"),
-    ("CHN_ATM", "ATM Machine", "Embedded"),
-    ("CHN_POS", "POS Terminal", "Embedded"),
-]
+MERCHANT_CATEGORIES = SEED_DATA["MERCHANT_CATEGORIES"]
+USER_SEGMENTS = SEED_DATA["USER_SEGMENTS"]
+SEGMENT_WEIGHTS = SEED_DATA["SEGMENT_WEIGHTS"]
+LOCATIONS = SEED_DATA["LOCATIONS"]
+TRANSACTION_TYPES = SEED_DATA["TRANSACTION_TYPES"]
+CHANNELS = SEED_DATA["CHANNELS"]
+ACCOUNT_TYPES = SEED_DATA["ACCOUNT_TYPES"]
+ACCOUNT_STATUSES = SEED_DATA["ACCOUNT_STATUSES"]
+ACCOUNT_STAT_W = SEED_DATA["ACCOUNT_STAT_W"]
 
 
 def seed_table(engine, table_name: str, df: pd.DataFrame) -> int:
@@ -118,18 +74,12 @@ def main():
 
     # 1. dim_transaction_type
     print("[STEP] [1/8] Seeding dim_transaction_type...")
-    df_tt = pd.DataFrame([
-        {"type_id": t, "type_name": n, "is_reward_eligible": e, "reward_multiplier": m}
-        for t, n, e, m in TRANSACTION_TYPES
-    ])
+    df_tt = pd.DataFrame(TRANSACTION_TYPES)
     results["dim_transaction_type"] = seed_table(engine, "dim_transaction_type", df_tt)
 
     # 2. dim_location
     print("[STEP] [2/8] Seeding dim_location...")
-    df_loc = pd.DataFrame([
-        {"location_id": lid, "city": city, "region": region}
-        for lid, city, region in LOCATIONS
-    ])
+    df_loc = pd.DataFrame(LOCATIONS)
     results["dim_location"] = seed_table(engine, "dim_location", df_loc)
 
     # 3. dim_date
@@ -179,10 +129,7 @@ def main():
 
     # 5. dim_channel
     print("[STEP] [5/8] Seeding dim_channel...")
-    df_channel = pd.DataFrame([
-        {"channel_id": cid, "channel_name": cname, "device_os": os_ver}
-        for cid, cname, os_ver in CHANNELS
-    ])
+    df_channel = pd.DataFrame(CHANNELS)
     results["dim_channel"] = seed_table(engine, "dim_channel", df_channel)
 
     # 6. dim_users (từ CSV)

@@ -1,65 +1,91 @@
-# Hướng dẫn Chạy Toàn bộ Code (End-to-End Execution Guide)
+# Real-time Data Pipeline for Fin-tech: Phân tích Giao dịch & Tính điểm Thưởng
 
-Đây là các bước để chạy toàn bộ hệ thống xử lý dữ liệu giao dịch thời gian thực (PaySim Fintech Pipeline).
+Dự án này triển khai một pipeline dữ liệu thời gian thực cho lĩnh vực Fin-tech, tập trung vào việc xử lý các giao dịch thanh toán (PaySim), kiểm soát trùng lặp (Deduplication), làm giàu dữ liệu (Data Enrichment) và tính toán điểm thưởng (Reward Points) tự động.
 
-## 1. Chuẩn bị Môi trường (Prerequisites)
+---
 
-*   **Docker Desktop**: Đã được cài đặt và đang chạy.
-*   **Python 3.10+**: Đã cài đặt `virtualenv`.
-*   **Hadoop binaries (Windows only)**: Hệ thống yêu cầu `winutils.exe` để chạy Spark Streaming cục bộ. 
-    *   *Tôi đã cài đặt sẵn vào thư mục `C:\hadoop\bin` cho bạn.*
+## 🏗️ Kiến trúc Hệ thống (Architecture)
 
-## 2. Khởi chạy Hạ tầng (Infrastructure)
+Hệ thống được thiết kế theo mô hình **Lambda Architecture** (phần Speed Layer) với các thành phần chính:
 
-Mở Terminal và chạy lệnh sau để khởi động PostgreSQL và Kafka:
+1.  **Data Source (Core Banking Simulation)**: Sử dụng kịch bản Python (`kafka_producer.py`) đọc dataset PaySim để đẩy luồng giao dịch vào Kafka.
+2.  **Message Broker**: **Apache Kafka** đóng vai trò là lớp đệm (buffer) cho dữ liệu streaming.
+3.  **Stream Processing**: **Apache Spark Structured Streaming** thực hiện:
+    *   Khử trùng lặp giao dịch (Deduplication) dựa trên `transaction_id` và `Watermark`.
+    *   Tích hợp dữ liệu tĩnh (Stream-Static Join) từ PostgreSQL để lấy hạng thành viên và hệ số thưởng.
+    *   Tính toán điểm thưởng theo logic nghiệp vụ phức tạp.
+4.  **Data Warehouse (Star Schema)**: **PostgreSQL** lưu trữ dữ liệu đã xử lý phục vụ báo cáo và Dashboard.
+5.  **Backup Sink**: Hỗ trợ ghi dữ liệu ra định dạng Parquet để nạp vào **Google BigQuery**.
 
+```mermaid
+graph TD
+    A[PaySim Dataset] --> B[Kafka Producer]
+    B -- "Topic: payment_events" --> C[Spark Streaming]
+    D[(PostgreSQL Dimensions)] -- "JDBC Lookup" --> C
+    C -- "Deduplication & Rewards" --> C
+    C -- "Primary Sink (UPSERT)" --> E[(PostgreSQL Fact)]
+    C -- "Backup Sink (Parquet)" --> F[Google BigQuery]
+```
+
+---
+
+## ✨ Tính năng Nổi bật
+
+*   **Kiểm soát Trùng lặp (Deduplication)**: Sử dụng cơ chế `withWatermark` và `dropDuplicates` của Spark để loại bỏ các giao dịch bị lặp lại trong vòng 5 phút (có test bằng Fault Injection 10% dữ liệu trùng).
+*   **Làm giàu dữ liệu thời gian thực (Real-time Enrichment)**: Thực hiện Join luồng Stream với các bảng Dim tĩnh trong PostgreSQL để lấy thông tin khách hàng mà không cần dữ liệu phải có sẵn trong Kafka payload.
+*   **Logic Điểm thưởng Nâng cao**: 
+    *   `Reward = Amount * Multiplier(TransactionType) * Multiplier(UserTier)`
+    *   Hạng Diamond: x2.0, Gold: x1.5, Standard: x1.0.
+*   **Tối ưu hóa trên Windows**: Cấu hình sẵn môi trường Spark chạy trên Windows (Winutils, SPARK_LOCAL_IP, Memory tuning 3GB).
+*   **Cơ chế Ghi Idempotent**: Sử dụng kỹ thuật UPSERT (INSERT ... ON CONFLICT) qua bảng Staging để đảm bảo dữ liệu không bị sai lệch khi Job Spark khởi động lại.
+
+---
+
+## 📊 Mô hình Dữ liệu (Star Schema)
+
+Hiện tại hệ thống hỗ trợ 9 bảng để phân tích chuyên sâu:
+
+*   **Fact Table**: `fact_transactions` (Lưu vết giao dịch + Điểm thưởng).
+*   **Dimension Tables**:
+    *   `dim_users`: Thông tin người dùng và phân hạng.
+    *   `dim_account`: Thông tin tài khoản (Debit, Credit, E-Wallet).
+    *   `dim_merchants`: Thông tin đơn vị chấp nhận thanh toán.
+    *   `dim_transaction_type`: Các loại giao dịch và hệ số điểm thưởng tương ứng.
+    *   `dim_location`: Thông tin địa lý (Tỉnh/Thành Việt Nam).
+    *   `dim_date`: Phân tích theo Ngày/Tháng/Quý/Năm.
+    *   `dim_time`: Phân tích theo Giờ/Phút/Khung giờ (Sáng, Trưa, Chiều, Tối).
+    *   `dim_channel`: Kênh giao dịch (App iOS, Android, Web, ATM, POS).
+
+---
+
+## 🚀 Hướng dẫn Chạy Hệ thống
+
+### 1. Khởi động hạ tầng
 ```powershell
 docker-compose up -d
 ```
 
-Đảm bảo các container `postgres`, `kafka`, và `zookeeper` đang ở trạng thái **Running**.
-
-## 3. Khởi tạo Cơ sở Dữ liệu (Database Setup)
-
-Chạy lệnh sau để tạo Schema (Star Schema) và nạp dữ liệu danh mục (Dimension) vào PostgreSQL:
-
+### 2. Cấu hình Database & Seed dữ liệu
 ```powershell
-# 1. Tạo các bảng (Fact & Dimensions)
+# Chạy script tạo bảng
 python warehouse/postgres_schema.py
 
-# 2. Nạp dữ liệu giả lập (Users, Accounts, Time, ...)
+# Nạp dữ liệu danh mục mẫu
 python warehouse/seed_dimensions_pg.py
 ```
 
-## 4. Chạy Pipeline Xử lý (Data Pipeline)
-
-Bạn cần mở **2 Terminal riêng biệt**:
-
-### Terminal 1: Chạy Spark Processor (Receiver)
-Đây là "bộ não" thực hiện khử trùng lặp giao dịch và tính điểm thưởng.
-```powershell
-python processor/spark_processor.py
-```
-*Đợi cho đến khi bạn thấy thông báo: `[DONE] Stream đang chạy. Nhấn Ctrl+C để dừng.`*
-
-### Terminal 2: Chạy Kafka Producer (Sender)
-Đây là trình giả lập Core Banking đẩy dữ liệu giao dịch vào Kafka.
-```powershell
-python producer/kafka_producer.py
-```
-
-## 5. Kiểm tra Kết quả (Verification)
-
-Sau khi Producer báo đã gửi dữ liệu, bạn có thể kiểm tra PostgreSQL để xem điểm thưởng đã được tính và lưu vào kho:
-
-```powershell
-docker exec -i postgres psql -U paysim -d paysim_dw -c "SELECT COUNT(*) FROM fact_transactions;"
-```
-
-Hoặc xem 5 giao dịch mới nhất với điểm thưởng:
-```powershell
-docker exec -i postgres psql -U paysim -d paysim_dw -c "SELECT transaction_id, account_id, amount, reward_points FROM fact_transactions LIMIT 5;"
-```
+### 3. Chạy Pipeline
+Mở 2 Terminal:
+*   **Terminal 1 (Spark)**: `python processor/spark_processor.py`
+*   **Terminal 2 (Producer)**: `python producer/kafka_producer.py`
 
 ---
-**Lưu ý**: Nếu chạy trên Windows, Spark có thể yêu cầu nhiều RAM (đã cấu hình 3GB). Hãy đảm bảo máy tính còn trống khoảng 4-6GB RAM.
+
+## 🛠️ Xử lý lỗi thường gặp (Troubleshooting)
+
+1.  **Lỗi Winutils (Hadoop)**: Đã cấu hình `HADOOP_HOME` trỏ về `C:\hadoop`. Nếu mất file, hãy tải lại `winutils.exe` cho Hadoop 3.2.2.
+2.  **Lỗi OutOfMemory**: Spark Session đã được nâng cấp lên 3GB RAM. Đảm bảo máy tính còn trống tối thiểu 4GB RAM khi chạy.
+3.  **Lỗi ConnectionReset (Py4J)**: Thường do lỗi Hostname trên Windows, đã xử lý bằng lệnh `os.environ["SPARK_LOCAL_IP"] = "127.0.0.1"`.
+
+---
+*Dự án thuộc khuôn khổ đồ án KLTN - ToMoiChoi/PaySim-Kafka-Data-Ingestion-Pipeline*

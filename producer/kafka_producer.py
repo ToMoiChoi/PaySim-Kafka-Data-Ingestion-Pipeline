@@ -156,7 +156,14 @@ def produce_messages(producer: KafkaProducer, df: pd.DataFrame, topic: str):
     print(f"{'='*60}")
 
 
+import sys
+
 def main():
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8')
+
     print("=" * 60)
     print("  PaySim CSV -> Kafka Producer Pipeline")
     print("=" * 60)

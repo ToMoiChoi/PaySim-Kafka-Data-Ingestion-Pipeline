@@ -1,9 +1,9 @@
 """
-BigQuery Star Schema - Tạo Dataset & 6 Bảng
+BigQuery Star Schema - Tạo Dataset & 9 Bảng
 =============================================
 Chạy script này một lần để khởi tạo Data Warehouse trên BigQuery:
   - 1 Fact table : fact_transactions
-  - 5 Dim tables : dim_users, dim_merchants, dim_transaction_type, dim_location, dim_date
+  - 8 Dim tables : dim_users, dim_merchants, dim_transaction_type, dim_location, dim_date, dim_time, dim_channel, dim_account
 
 Yêu cầu:
   - Biến môi trường GOOGLE_APPLICATION_CREDENTIALS trỏ tới file Service Account JSON.
@@ -34,14 +34,20 @@ TABLES = {
                              description="Mã giao dịch duy nhất (UUID)"),
         bigquery.SchemaField("user_id", "STRING", mode="NULLABLE",
                              description="FK -> dim_users"),
+        bigquery.SchemaField("account_id", "STRING", mode="NULLABLE",
+                             description="FK -> dim_account"),
         bigquery.SchemaField("merchant_id", "STRING", mode="NULLABLE",
                              description="FK -> dim_merchants"),
         bigquery.SchemaField("type_id", "STRING", mode="NULLABLE",
                              description="FK -> dim_transaction_type"),
         bigquery.SchemaField("location_id", "STRING", mode="NULLABLE",
                              description="FK -> dim_location"),
+        bigquery.SchemaField("channel_id", "STRING", mode="NULLABLE",
+                             description="FK -> dim_channel"),
         bigquery.SchemaField("date_key", "INT64", mode="NULLABLE",
                              description="FK -> dim_date (YYYYMMDD)"),
+        bigquery.SchemaField("time_key", "INT64", mode="NULLABLE",
+                             description="FK -> dim_time (HHMM)"),
         bigquery.SchemaField("transaction_time", "TIMESTAMP", mode="NULLABLE",
                              description="Thời gian xử lý giao dịch"),
         bigquery.SchemaField("amount", "NUMERIC", mode="NULLABLE",
@@ -142,6 +148,44 @@ TABLES = {
         bigquery.SchemaField("is_leap_year",  "BOOL",   mode="NULLABLE",
                              description="TRUE nếu là năm nhuận"),
     ],
+
+    # ─── DIMENSION: TIME ─────────────────────────────────────────
+    "dim_time": [
+        bigquery.SchemaField("time_key", "INT64", mode="REQUIRED",
+                             description="Khóa giờ phút HHMM"),
+        bigquery.SchemaField("hour", "INT64", mode="NULLABLE",
+                             description="Giờ (0-23)"),
+        bigquery.SchemaField("minute", "INT64", mode="NULLABLE",
+                             description="Phút (0-59)"),
+        bigquery.SchemaField("time_of_day", "STRING", mode="NULLABLE",
+                             description="Khoảng thời gian (Morning/Afternoon/...)"),
+        bigquery.SchemaField("is_business_hour", "BOOL", mode="NULLABLE",
+                             description="TRUE nếu trong giờ hành chính"),
+    ],
+
+    # ─── DIMENSION: CHANNEL ──────────────────────────────────────
+    "dim_channel": [
+        bigquery.SchemaField("channel_id", "STRING", mode="REQUIRED",
+                             description="Mã kênh giao dịch (WEB/APP/POS)"),
+        bigquery.SchemaField("channel_name", "STRING", mode="NULLABLE",
+                             description="Tên kênh giao dịch"),
+        bigquery.SchemaField("device_os", "STRING", mode="NULLABLE",
+                             description="Hệ điều hành"),
+    ],
+
+    # ─── DIMENSION: ACCOUNT ──────────────────────────────────────
+    "dim_account": [
+        bigquery.SchemaField("account_id", "STRING", mode="REQUIRED",
+                             description="Mã tài khoản (Từ UUID)"),
+        bigquery.SchemaField("user_id", "STRING", mode="NULLABLE",
+                             description="Mã khách hàng sở hữu (FK -> dim_users)"),
+        bigquery.SchemaField("account_type", "STRING", mode="NULLABLE",
+                             description="Loại: Debit/Credit/E-Wallet"),
+        bigquery.SchemaField("account_status", "STRING", mode="NULLABLE",
+                             description="Trạng thái tài khoản (Active/Locked/...)"),
+        bigquery.SchemaField("created_date", "DATE", mode="NULLABLE",
+                             description="Ngày mở tài khoản"),
+    ],
 }
 
 
@@ -179,6 +223,12 @@ def create_tables(client: bigquery.Client) -> None:
             table.description = "Dimension - Thông tin địa lý"
         elif table_name == "dim_date":
             table.description = "Dimension - Trục thời gian chuẩn"
+        elif table_name == "dim_time":
+            table.description = "Dimension - Giờ phút trong ngày"
+        elif table_name == "dim_channel":
+            table.description = "Dimension - Kênh giao dịch (App, Web...)"
+        elif table_name == "dim_account":
+            table.description = "Dimension - Thông tin loại tài khoản của khách hàng"
 
         table = client.create_table(table, exists_ok=True)
         print(f"  [+] Bảng '{table_name}' đã tạo ({len(schema)} cột)")
