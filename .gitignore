@@ -5,4 +5,5 @@ credentials/
 **/__pycache__/
 *.pyc
 .env
-service-account.json
+bq_backup/
+.ivy2/

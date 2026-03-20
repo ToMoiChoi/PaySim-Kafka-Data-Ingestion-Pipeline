@@ -14,13 +14,16 @@ Luồng xử lý:
 """
 
 import os
+import sys
 import time
 import random
 import logging
 
+import psycopg2
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import (
-    from_json, col, expr, udf, when, current_timestamp, date_format
+    from_json, col, expr, udf, when, current_timestamp, date_format,
+    array, lit, rand, floor
 )
 from pyspark.sql.types import (
     StructType, StructField, StringType, IntegerType, DoubleType
@@ -205,7 +208,6 @@ def build_fact_df(spark: SparkSession, parsed_df: DataFrame) -> DataFrame:
     )
 
     # 6. Gán Location ngẫu nhiên (chỉ để phục vụ Map Dashboard nếu chưa có trong source)
-    from pyspark.sql.functions import array, lit, rand, floor
     
     # Create an array column of location IDs
     loc_array = array(*[lit(loc) for loc in LOCATION_IDS])
@@ -246,16 +248,11 @@ def write_to_postgres(batch_df: DataFrame, batch_id: int, row_count: int):
     )
 
     # UPSERT từ staging -> fact_transactions (dùng psycopg2)
-    import psycopg2
     conn = psycopg2.connect(
         host=PG_HOST, port=PG_PORT, dbname=PG_DB,
         user=PG_USER, password=PG_PASSWORD
     )
     with conn.cursor() as cur:
-        # Tạo staging table nếu chưa có (giống cấu trúc fact)
-        cur.execute(f"""
-            CREATE TABLE IF NOT EXISTS {staging} (LIKE fact_transactions INCLUDING ALL)
-        """)
         # UPSERT: INSERT ... ON CONFLICT DO UPDATE
         cur.execute(f"""
             INSERT INTO fact_transactions
@@ -281,7 +278,7 @@ def write_to_postgres(batch_df: DataFrame, batch_id: int, row_count: int):
                 "isFlaggedFraud" = EXCLUDED."isFlaggedFraud",
                 ip_address       = EXCLUDED.ip_address
         """)
-        cur.execute(f"TRUNCATE TABLE {staging}")
+        cur.execute(f"DROP TABLE IF EXISTS {staging}")
     conn.commit()
     conn.close()
 
@@ -373,7 +370,6 @@ def dual_sink_batch(batch_df: DataFrame, batch_id: int):
 
 
 # ─── Main ────────────────────────────────────────────────────────
-import sys
 
 def main():
     if hasattr(sys.stdout, 'reconfigure'):

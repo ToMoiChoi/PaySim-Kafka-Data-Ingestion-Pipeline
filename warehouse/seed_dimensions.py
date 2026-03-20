@@ -175,7 +175,7 @@ def seed_dim_users(client: bigquery.Client):
 
     print(f"  [FILE] Đọc CSV: {CSV_PATH} (chỉ cột nameOrig, oldbalanceOrg)...")
     df = pd.read_csv(CSV_PATH, usecols=["type", "nameOrig", "oldbalanceOrg"])
-    df = df[df["type"] == "PAYMENT"]
+    df = df[df["type"] == "PAYMENT"].dropna(subset=["nameOrig"])
 
     # Lấy unique users, giữ balance lớn nhất
     users = df.groupby("nameOrig")["oldbalanceOrg"].max().reset_index()
@@ -234,7 +234,7 @@ def seed_dim_merchants(client: bigquery.Client) -> int:
 
     print(f"  [FILE] Đọc CSV: {CSV_PATH} (chỉ cột nameDest)...")
     df = pd.read_csv(CSV_PATH, usecols=["type", "nameDest"])
-    df = df[df["type"] == "PAYMENT"]
+    df = df[df["type"] == "PAYMENT"].dropna(subset=["nameDest"])
 
     # Merchants trong PaySim bắt đầu bằng "M"
     merchants = df["nameDest"].unique()

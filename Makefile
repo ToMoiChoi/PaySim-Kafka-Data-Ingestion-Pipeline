@@ -40,6 +40,7 @@ help:
 	@echo ""
 	@echo "$(YELLOW)🚀  Pipeline$(RESET)"
 	@echo "  make run-producer   Run Kafka producer (publish PaySim events)"
+	@echo "  make run-live       Run live producer (real-time demo)"
 	@echo "  make run-spark      Run Spark locally (BigQuery sink)"
 	@echo "  make run-spark-docker  Run Spark in Docker container"
 	@echo ""
@@ -92,8 +93,13 @@ logs:
 
 # ── Producer ─────────────────────────────────────────────────
 run-producer:
-	@echo "$(GREEN)📤 Starting Kafka producer...$(RESET)"
+	@echo "$(GREEN)📤 Starting Kafka producer (batch CSV)...$(RESET)"
 	python -m producer.kafka_producer
+
+# ── Live Producer (real-time demo) ────────────────────────────
+run-live:
+	@echo "$(GREEN)📤 Starting Live producer (real-time demo)...$(RESET)"
+	python -m producer.live_producer
 
 # ── Spark (local mode) ────────────────────────────────────────
 run-spark:
@@ -114,6 +120,6 @@ reconcile:
 clean:
 	@echo "$(YELLOW)🧹 Cleaning up...$(RESET)"
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-	rm -rf /tmp/spark_checkpoint_bq_v2 2>/dev/null || true
-	rm -rf /tmp/spark_checkpoint_bq_native 2>/dev/null || true
+	rm -rf /tmp/spark_checkpoint_dual_sink 2>/dev/null || true
+	rm -rf /tmp/bq_backup 2>/dev/null || true
 	@echo "$(GREEN)✅ Done.$(RESET)"

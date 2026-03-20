@@ -77,7 +77,12 @@ python warehouse/seed_dimensions_pg.py
 ### 3. Chạy Pipeline
 Mở 2 Terminal:
 *   **Terminal 1 (Spark)**: `python processor/spark_processor.py`
-*   **Terminal 2 (Producer)**: `python producer/kafka_producer.py`
+*   **Terminal 2 (Producer)**: `python producer/kafka_producer.py` (batch lịch sử)
+
+### 4. Chạy Demo Real-time
+Mở 2 Terminal:
+*   **Terminal 1 (Spark)**: `python processor/spark_processor.py`
+*   **Terminal 2 (Live Producer)**: `python producer/live_producer.py` (giao dịch liên tục)
 
 ---
 
@@ -86,6 +91,7 @@ Mở 2 Terminal:
 1.  **Lỗi Winutils (Hadoop)**: Đã cấu hình `HADOOP_HOME` trỏ về `C:\hadoop`. Nếu mất file, hãy tải lại `winutils.exe` cho Hadoop 3.2.2.
 2.  **Lỗi OutOfMemory**: Spark Session đã được nâng cấp lên 3GB RAM. Đảm bảo máy tính còn trống tối thiểu 4GB RAM khi chạy.
 3.  **Lỗi ConnectionReset (Py4J)**: Thường do lỗi Hostname trên Windows, đã xử lý bằng lệnh `os.environ["SPARK_LOCAL_IP"] = "127.0.0.1"`.
+4.  **Lỗi Foreign Key Violation**: Đảm bảo chạy `python warehouse/seed_dimensions_pg.py` trước khi chạy Pipeline để nạp đầy đủ dữ liệu Dimension Tables.
 
 ---
 *Dự án thuộc khuôn khổ đồ án KLTN - ToMoiChoi/PaySim-Kafka-Data-Ingestion-Pipeline*
