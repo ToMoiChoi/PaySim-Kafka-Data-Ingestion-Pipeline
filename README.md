@@ -84,6 +84,13 @@ Mở 2 Terminal:
 *   **Terminal 1 (Spark)**: `python processor/spark_processor.py`
 *   **Terminal 2 (Live Producer)**: `python producer/live_producer.py` (giao dịch liên tục)
 
+### 5. Kiểm tra Dữ liệu Data Warehouse (PostgreSQL)
+Sau khi chạy luồng giao dịch, bạn có thể kiểm tra xem dữ liệu đã vào Database chưa bằng script dưới đây:
+```powershell
+python scripts/check_pg_data.py
+# Hoặc dùng Makefile: make check-db
+```
+
 ---
 
 ## 🛠️ Xử lý lỗi thường gặp (Troubleshooting)

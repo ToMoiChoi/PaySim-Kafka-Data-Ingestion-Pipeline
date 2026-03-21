@@ -46,6 +46,7 @@ help:
 	@echo ""
 	@echo "$(YELLOW)📊  Verification$(RESET)"
 	@echo "  make reconcile      Compare Kafka msgs vs BigQuery rows"
+	@echo "  make check-db       Query data & rewards from Postgres DW"
 	@echo ""
 	@echo "$(YELLOW)🧹  Cleanup$(RESET)"
 	@echo "  make clean          Remove __pycache__ & checkpoint dirs"
@@ -115,6 +116,11 @@ run-spark-docker:
 reconcile:
 	@echo "$(GREEN)📊 Running reconciliation check...$(RESET)"
 	python -m warehouse.bq_reconcile
+
+# ── Check Postgres Data ───────────────────────────────────────
+check-db:
+	@echo "$(GREEN)📊 Querying Postgres Data Warehouse...$(RESET)"
+	python scripts/check_pg_data.py
 
 # ── Cleanup ───────────────────────────────────────────────────
 clean:
