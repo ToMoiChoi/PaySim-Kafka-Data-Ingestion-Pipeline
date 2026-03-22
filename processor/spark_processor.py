@@ -76,7 +76,7 @@ LOCATION_IDS = [
 ]
 
 
-# ─── Kafka Schema ────────────────────────────────────────────────
+# ─── Kafka Schema ────────────────────────────────────────────────    # 3. Phân tích cú pháp JSON
 payment_schema = StructType([
     StructField("step",            IntegerType(), True),
     StructField("type",            StringType(),  True),
@@ -93,7 +93,7 @@ payment_schema = StructType([
     StructField("event_timestamp", StringType(),  True),
     StructField("account_id",      StringType(),  True),
     StructField("channel_id",      StringType(),  True),
-    StructField("ip_address",      StringType(),  True),
+    StructField("ip_address",      StringType(),  True)
 ])
 
 
@@ -221,7 +221,7 @@ def build_fact_df(spark: SparkSession, parsed_df: DataFrame) -> DataFrame:
         "type_id", "location_id", "channel_id", "date_key", "time_key",
         "transaction_time", "amount", "reward_points",
         "type", "step", "oldbalanceOrg", "newbalanceOrig",
-        "oldbalanceDest", "newbalanceDest", "isFraud", "isFlaggedFraud", "ip_address"
+        "oldbalanceDest", "newbalanceDest", "isFraud", "isFlaggedFraud", "ip_address", "user_id"
     )
 
     return final_fact_df
@@ -260,6 +260,7 @@ def write_to_postgres(batch_df: DataFrame, batch_id: int, row_count: int):
             ON CONFLICT (transaction_id) DO UPDATE SET
                 account_id       = EXCLUDED.account_id,
                 merchant_id      = EXCLUDED.merchant_id,
+                user_id          = EXCLUDED.user_id,
                 type_id          = EXCLUDED.type_id,
                 location_id      = EXCLUDED.location_id,
                 channel_id       = EXCLUDED.channel_id,
@@ -398,6 +399,7 @@ def main():
         .option("subscribe", KAFKA_TOPIC)
         .option("startingOffsets", "earliest")
         .option("failOnDataLoss", "false")
+        .option("maxOffsetsPerTrigger", "50000")
         .load()
     )
 
@@ -418,7 +420,7 @@ def main():
         .outputMode("append")
         .foreachBatch(dual_sink_batch)
         .trigger(processingTime="15 seconds")
-        .option("checkpointLocation", "/tmp/spark_checkpoint_dual_sink")
+        .option("checkpointLocation", "/tmp/spark_checkpoint_dual_sink_v2")
         .start()
     )
 

@@ -122,6 +122,11 @@ check-db:
 	@echo "$(GREEN)📊 Querying Postgres Data Warehouse...$(RESET)"
 	python scripts/check_pg_data.py
 
+# ── Upload to BigQuery ────────────────────────────────────────
+upload-bq:
+	@echo "$(GREEN)☁️  Syncing Postgres Data to BigQuery...$(RESET)"
+	python scripts/pg_to_bq_sync.py
+
 # ── Cleanup ───────────────────────────────────────────────────
 clean:
 	@echo "$(YELLOW)🧹 Cleaning up...$(RESET)"

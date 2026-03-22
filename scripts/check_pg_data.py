@@ -1,32 +1,35 @@
 import os
+import sys
 import pandas as pd
 import psycopg2
 from dotenv import load_dotenv
 
 # Load biến môi trường từ file .env
 load_dotenv()
-
+# CONN = "postgresql://paysim:paysim123@localhost:5432/paysim_dw"
 PG_HOST     = os.getenv("POSTGRES_HOST", "localhost")
 PG_PORT     = os.getenv("POSTGRES_PORT", "5432")
 PG_DB       = os.getenv("POSTGRES_DB", "paysim_dw")
 PG_USER     = os.getenv("POSTGRES_USER", "paysim")
 PG_PASSWORD = os.getenv("POSTGRES_PASSWORD", "paysim123")
 
+import sqlalchemy as sa
+
 def fetch_data(query: str) -> pd.DataFrame:
     """Hàm phụ trợ để chạy query và trả về Pandas DataFrame giúp in ra bảng đẹp hơn."""
     try:
-        conn = psycopg2.connect(
-            host=PG_HOST, port=PG_PORT, dbname=PG_DB,
-            user=PG_USER, password=PG_PASSWORD
-        )
-        df = pd.read_sql_query(query, conn)
-        conn.close()
+        DATABASE_URL = f"postgresql+psycopg2://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
+        # Dùng trực tiếp chuỗi URL để Pandas tự quản lý Engine & Connection (chuẩn nhất cho pandas >= 2.0)
+        df = pd.read_sql_query(query, DATABASE_URL)
         return df
     except Exception as e:
         print(f"❌ Lỗi kết nối PostgreSQL: {e}")
         return pd.DataFrame()
 
 def main():
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+        
     print("=" * 70)
     print("🔍 KIỂM TRA DỮ LIỆU TRONG POSTGRESQL DATA WAREHOUSE")
     print("=" * 70)
@@ -47,13 +50,14 @@ def main():
             f.amount,
             u.user_segment,
             f.reward_points,
-            f.isFraud
+            f.user_id,
+            f."isFraud" as is_fraud
         FROM 
             fact_transactions f
         LEFT JOIN 
             dim_account a ON f.account_id = a.account_id
         LEFT JOIN 
-            dim_users u ON a.user_id = u.user_id
+            dim_users u ON f.user_id = u.user_id
         ORDER BY 
             f.transaction_time DESC 
         LIMIT 5;
@@ -75,10 +79,10 @@ def main():
             SUM(f.reward_points) as total_rewards
         FROM 
             fact_transactions f
-        JOIN 
+        LEFT JOIN 
             dim_account a ON f.account_id = a.account_id
-        JOIN 
-            dim_users u ON a.user_id = u.user_id
+        LEFT JOIN 
+            dim_users u ON f.user_id = u.user_id
         GROUP BY 
             u.user_segment
         ORDER BY 

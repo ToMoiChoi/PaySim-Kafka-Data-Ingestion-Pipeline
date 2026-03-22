@@ -33,7 +33,7 @@ TABLES = {
         bigquery.SchemaField("transaction_id", "STRING", mode="NULLABLE",
                              description="Mã giao dịch duy nhất (UUID)"),
         bigquery.SchemaField("user_id", "STRING", mode="NULLABLE",
-                             description="FK -> dim_users"),
+                             description="Mã khách hàng thực hiện GD"),
         bigquery.SchemaField("account_id", "STRING", mode="NULLABLE",
                              description="FK -> dim_account"),
         bigquery.SchemaField("merchant_id", "STRING", mode="NULLABLE",
@@ -53,7 +53,7 @@ TABLES = {
         bigquery.SchemaField("amount", "NUMERIC", mode="NULLABLE",
                              description="Giá trị giao dịch"),
         bigquery.SchemaField("reward_points", "INT64", mode="NULLABLE",
-                             description="Điểm thưởng (amount × 0.01)"),
+                             description="Điểm thưởng (amount × multiplier)"),
         # --- ORIGINAL PAYSIM COLUMNS ---
         bigquery.SchemaField("type", "STRING", mode="NULLABLE",
                              description="Loại giao dịch gốc (CASH_IN, CASH_OUT, DEBIT, PAYMENT, TRANSFER)"),
@@ -71,6 +71,8 @@ TABLES = {
                              description="Đánh dấu gian lận (1=Fraud)"),
         bigquery.SchemaField("isFlaggedFraud", "INT64", mode="NULLABLE",
                              description="Đánh dấu gian lận của hệ thống cấm (1=Flagged)"),
+        bigquery.SchemaField("ip_address", "STRING", mode="NULLABLE",
+                             description="Địa chỉ IP của thiết bị giao dịch"),
     ],
 
     # ─── DIMENSION: USERS ────────────────────────────────────────
@@ -211,7 +213,7 @@ def create_tables(client: bigquery.Client) -> None:
                 type_=bigquery.TimePartitioningType.DAY,
                 field="transaction_time",
             )
-            table.clustering_fields = ["user_id", "merchant_id"]
+            table.clustering_fields = ["account_id", "merchant_id"]
             table.description = "Bảng Fact - Lịch sử giao dịch & điểm thưởng"
         elif table_name == "dim_users":
             table.description = "Dimension - Thông tin khách hàng"
