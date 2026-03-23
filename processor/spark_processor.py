@@ -300,6 +300,12 @@ def write_to_bq_backup(batch_df: DataFrame, batch_id: int, row_count: int):
     t0 = time.time()
     parquet_path = f"{BQ_PARQUET_DIR}/batch_{batch_id}"
 
+    # Cast decimal -> double để khớp BigQuery FLOAT64 schema
+    from pyspark.sql.types import DecimalType, DoubleType
+    for field in batch_df.schema.fields:
+        if isinstance(field.dataType, DecimalType):
+            batch_df = batch_df.withColumn(field.name, col(field.name).cast(DoubleType()))
+
     # Ghi Parquet ra disk (nhiều part-file)
     batch_df.coalesce(1).write.mode("overwrite").parquet(parquet_path)
 

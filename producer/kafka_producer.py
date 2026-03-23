@@ -2,10 +2,9 @@
 PaySim CSV -> Kafka Producer Pipeline : Data Ingestion Pipeline
 =====================================
 1. Đọc file PaySim CSV bằng pandas - Dataset: Kaggle PaySim Dataset
-2. Lọc giao dịch type == "PAYMENT"
-3. Thêm cột transaction_id (UUID4) và event_timestamp (current time)
-4. Fault Injection: nhân bản ngẫu nhiên 10% records (cùng transaction_id) để tạo dữ liệu trùng
-5. Gửi từng dòng JSON vào Kafka topic "payment_events"
+2. Thêm cột transaction_id (UUID4) và event_timestamp (current time)
+3. Fault Injection: nhân bản ngẫu nhiên 10% records (cùng transaction_id) để tạo dữ liệu trùng
+4. Gửi từng dòng JSON vào Kafka topic "payment_events_v3"
 """
 
 import json
@@ -26,7 +25,7 @@ load_dotenv()
 # ─── Configuration (all from .env) ──────────────────────────────
 CSV_PATH            = os.getenv("CSV_PATH", "data/PS_20174392719_1491204439457_log.csv")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-KAFKA_TOPIC         = os.getenv("KAFKA_TOPIC", "payment_events")
+KAFKA_TOPIC         = os.getenv("KAFKA_TOPIC", "payment_events_v3")
 DUPLICATE_RATIO     = float(os.getenv("DUPLICATE_RATIO", "0.10"))
 BATCH_SIZE          = int(os.getenv("BATCH_SIZE", "65536"))
 LINGER_MS           = int(os.getenv("LINGER_MS", "50"))
@@ -42,10 +41,9 @@ def load_and_transform(csv_path: str) -> pd.DataFrame:
     total_rows = len(df)
     print(f"      Tổng số dòng trong file: {total_rows:,}")
 
-    # Lọc chỉ giao dịch PAYMENT
-    df = df[df["type"] == "PAYMENT"].copy()
+
     payment_rows = len(df)
-    print(f"[2/4] Lọc PAYMENT: {payment_rows:,} / {total_rows:,} dòng")
+    print(f"[2/4] Lấy toàn bộ giao dịch: {payment_rows:,} / {total_rows:,} dòng")
 
     # Sinh transaction_id (UUID4) cho mỗi dòng
     df["transaction_id"] = [str(uuid.uuid4()) for _ in range(len(df))]

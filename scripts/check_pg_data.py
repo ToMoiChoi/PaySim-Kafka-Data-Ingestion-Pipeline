@@ -55,8 +55,6 @@ def main():
         FROM 
             fact_transactions f
         LEFT JOIN 
-            dim_account a ON f.account_id = a.account_id
-        LEFT JOIN 
             dim_users u ON f.user_id = u.user_id
         ORDER BY 
             f.transaction_time DESC 
@@ -80,8 +78,6 @@ def main():
         FROM 
             fact_transactions f
         LEFT JOIN 
-            dim_account a ON f.account_id = a.account_id
-        LEFT JOIN 
             dim_users u ON f.user_id = u.user_id
         GROUP BY 
             u.user_segment
@@ -96,6 +92,26 @@ def main():
         if 'total_rewards' in df_stats.columns:
             df_stats['total_rewards'] = df_stats['total_rewards'].apply(lambda x: f"{x:,.0f} pts" if pd.notnull(x) else "0 pts")
         print(df_stats.to_string(index=False))
+
+    # 4. Thống kê theo Loại Giao Dịch
+    print("\n4️⃣ THỐNG KÊ TỔNG GIAO DỊCH THEO LOẠI HÌNH (TRANSACTION TYPE):")
+    query_types = """
+        SELECT 
+            type,
+            COUNT(transaction_id) as tx_count,
+            SUM(amount) as total_volume
+        FROM 
+            fact_transactions
+        GROUP BY 
+            type
+        ORDER BY 
+            tx_count DESC;
+    """
+    df_types = fetch_data(query_types)
+    if not df_types.empty:
+        if 'total_volume' in df_types.columns:
+            df_types['total_volume'] = df_types['total_volume'].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "$0")
+        print(df_types.to_string(index=False))
 
     print("\n" + "=" * 70)
     print("Mẹo: Nếu hệ thống chưa có dữ liệu, hãy chạy Docker, sau đó chạy Spark và Producer!")

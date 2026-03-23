@@ -154,7 +154,8 @@ def main():
     # 6. dim_users (từ CSV)
     print(f"[STEP] [6/8] Seeding dim_users (từ {CSV_PATH})...")
     df = pd.read_csv(CSV_PATH, usecols=["type", "nameOrig", "oldbalanceOrg"])
-    df = df[df["type"] == "PAYMENT"].dropna(subset=["nameOrig"])
+    # Lấy toàn bộ loại giao dịch (không chỉ PAYMENT)
+    df = df.dropna(subset=["nameOrig"])
     users = df.groupby("nameOrig")["oldbalanceOrg"].max().reset_index()
     users.columns = ["user_id", "account_balance"]
     base_date = date(2024, 1, 1)
@@ -182,7 +183,8 @@ def main():
     # 8. dim_merchants (từ CSV)
     print(f"[STEP] [8/8] Seeding dim_merchants (từ {CSV_PATH})...")
     df2 = pd.read_csv(CSV_PATH, usecols=["type", "nameDest"])
-    df2 = df2[df2["type"] == "PAYMENT"].dropna(subset=["nameDest"])
+    # Lấy toàn bộ loại giao dịch (không chỉ PAYMENT)
+    df2 = df2.dropna(subset=["nameDest"])
     merchants_ids = [m for m in df2["nameDest"].unique() if str(m).startswith("M")]
     df_mer = pd.DataFrame({
         "merchant_id":       merchants_ids,
