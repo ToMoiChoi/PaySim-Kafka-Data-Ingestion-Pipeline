@@ -9,3 +9,4 @@ pandas-gbq
 psycopg2-binary>=2.9.0
 sqlalchemy>=2.0.0
 psycopg2
+websocket-client>=1.6.0

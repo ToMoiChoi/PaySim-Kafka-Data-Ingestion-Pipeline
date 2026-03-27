@@ -37,7 +37,7 @@ RETRY_INTERVAL_SEC  = int(os.getenv("RETRY_INTERVAL_SEC", "5"))
 def load_and_transform(csv_path: str) -> pd.DataFrame:
     """Đọc CSV, lọc PAYMENT, thêm transaction_id, event_timestamp & mock data."""
     print(f"[1/4] Đọc file CSV: {csv_path}")
-    df = pd.read_csv(csv_path)
+    df = pd.read_csv(csv_path, nrows=3_000_000)  # Giới hạn 1 triệu dòng cho demo
     total_rows = len(df)
     print(f"      Tổng số dòng trong file: {total_rows:,}")
 
@@ -48,16 +48,21 @@ def load_and_transform(csv_path: str) -> pd.DataFrame:
     # Sinh transaction_id (UUID4) cho mỗi dòng
     df["transaction_id"] = [str(uuid.uuid4()) for _ in range(len(df))]
 
-    # Gán event_timestamp = thời gian hiện tại
-    df["event_timestamp"] = datetime.now(timezone.utc).isoformat()
+    # Gán event_timestamp theo cột `step` (1 step = 1 giờ) bắt đầu từ 01/01/2026.
+    # Logic này đảm bảo toàn vẹn tính tuần tự (Timeseries) của dataset!
+    start_date = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    df["event_timestamp"] = df["step"].apply(
+        lambda s: (start_date + pd.Timedelta(hours=int(s)) + pd.Timedelta(minutes=random.randint(0, 59), seconds=random.randint(0, 59))).isoformat()
+    )
     
     # --- MOCK DATA FOR NEW DIMENSIONS ---
     # 1. account_id: Lấy nameOrig (user_id) + "_ACC1"
     df["account_id"] = df["nameOrig"] + "_ACC1"
     
-    # 2. channel_id: Random từ danh sách tĩnh
+    # 2. channel_id: Random từ danh sách tĩnh với tỷ lệ thực tế
     CHANNELS = ["CHN_APP_IOS", "CHN_APP_AND", "CHN_WEB", "CHN_ATM", "CHN_POS"]
-    df["channel_id"] = random.choices(CHANNELS, k=len(df))
+    CHANNEL_WEIGHTS = [35, 35, 15, 10, 5]  # Mobile app chiếm 70%, Web 15%, ATM 10%, POS 5%
+    df["channel_id"] = random.choices(CHANNELS, weights=CHANNEL_WEIGHTS, k=len(df))
     
     # 3. ip_address: Sinh IP ngẫu nhiên
     df["ip_address"] = [f"{random.randint(1,255)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,255)}" for _ in range(len(df))]
@@ -79,9 +84,13 @@ def inject_duplicates(df: pd.DataFrame, ratio: float = DUPLICATE_RATIO) -> pd.Da
     duplicate_indices = random.sample(range(len(df)), n_duplicates)
     duplicates = df.iloc[duplicate_indices].copy()
 
-    # Ghép duplicates vào cuối, sau đó shuffle toàn bộ
+    # Độ trễ từ 1-5 giây để mô phỏng độ trễ Retry thực tế
+    duplicates["event_timestamp"] = pd.to_datetime(duplicates["event_timestamp"]) + pd.Timedelta(seconds=random.randint(1,5))
+    duplicates["event_timestamp"] = duplicates["event_timestamp"].apply(lambda x: x.isoformat())
+
+    # Ghép duplicates vào cuối, sau đó SORT CHUẨN THỜI GIAN để duy trì dòng chảy (không shuffle loạn xạ)
     df_with_dupes = pd.concat([df, duplicates], ignore_index=True)
-    df_with_dupes = df_with_dupes.sample(frac=1, random_state=42).reset_index(drop=True)
+    df_with_dupes = df_with_dupes.sort_values(by="event_timestamp").reset_index(drop=True)
 
     print(f"      Tổng records sau injection: {len(df_with_dupes):,} "
           f"(gốc: {len(df):,} + trùng: {n_duplicates:,})")
@@ -122,8 +131,9 @@ def produce_messages(producer: KafkaProducer, df: pd.DataFrame, topic: str):
 
     start_time = time.time()
 
-    for idx, row in df.iterrows():
-        message = row.to_dict()
+    # Tối ưu hóa: Tránh iterrows chậm chạp, chuyển sang dict trước
+    records = df.to_dict(orient="records")
+    for idx, message in enumerate(records):
 
         try:
             producer.send(topic, value=message)

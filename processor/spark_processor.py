@@ -160,13 +160,20 @@ def build_fact_df(spark: SparkSession, parsed_df: DataFrame) -> DataFrame:
         .withColumn("newbalanceOrig",  col("newbalanceOrig").cast("decimal(38,9)"))
         .withColumn("oldbalanceDest",  col("oldbalanceDest").cast("decimal(38,9)"))
         .withColumn("newbalanceDest",  col("newbalanceDest").cast("decimal(38,9)"))
-        # Mock Type ID tạm nếu cần
+        # Type ID mapping: Hỗ trợ cả batch (CSV) và live (Binance) types
         .withColumn("type_id",
+            # --- Legacy types (từ CSV PaySim batch) ---
             when(col("type") == "PAYMENT",  "TYP_PAYMENT")
             .when(col("type") == "TRANSFER","TYP_TRANSFER")
             .when(col("type") == "CASH_OUT","TYP_CASH_OUT")
             .when(col("type") == "DEBIT",   "TYP_DEBIT")
             .when(col("type") == "CASH_IN", "TYP_CASH_IN")
+            # --- Crypto types (từ Binance live stream) ---
+            .when(col("type") == "SPOT_BUY",    "TYP_SPOT_BUY")
+            .when(col("type") == "SPOT_SELL",   "TYP_SPOT_SELL")
+            .when(col("type") == "LARGE_TRADE", "TYP_LARGE_TRADE")
+            .when(col("type") == "MICRO_TRADE", "TYP_MICRO_TRADE")
+            .when(col("type") == "WHALE_ALERT", "TYP_WHALE_ALERT")
             .otherwise("TYP_PAYMENT")
         )
     )
