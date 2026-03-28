@@ -105,8 +105,9 @@ def create_spark_session() -> SparkSession:
     import sys
     if sys.platform.startswith('win'):
         os.environ['PATH'] = os.environ['PATH'] + ';' + r'C:\hadoop\bin'
-        # Fix BlockManager null pointer exception on Windows 
+        # Fix BlockManagerId NullPointerException on Windows
         os.environ["SPARK_LOCAL_IP"] = "127.0.0.1"
+        os.environ["SPARK_LOCAL_HOSTNAME"] = "127.0.0.1"
 
     builder = (
         SparkSession.builder
@@ -121,7 +122,10 @@ def create_spark_session() -> SparkSession:
         .config("spark.driver.memory", "3g")  # <-- Tăng lên 3g để chứa broadcast dim_users
         .config("spark.executor.memory", "3g") # <-- Tăng lên 3g
         .config("spark.memory.fraction", "0.6") # Giữ heap memory gọn nhẹ
-        .config("spark.sql.execution.arrow.pyspark.enabled", "true") # Tăng tốc xử lý Pandas/UDF
+        .config("spark.sql.execution.arrow.pyspark.enabled", "true")
+        # Fix BlockManagerId NullPointerException on Windows
+        .config("spark.driver.host", "127.0.0.1")
+        .config("spark.driver.bindAddress", "127.0.0.1")
     )
 
     return builder.getOrCreate()
@@ -179,17 +183,23 @@ def build_fact_df(spark: SparkSession, parsed_df: DataFrame) -> DataFrame:
     )
 
     # 4. Stream-Static Joins (Tích hợp Dữ liệu Tham chiếu)
+    from pyspark.sql.functions import broadcast
+
     # Lấy thông tin Hạng người dùng (User Segment) từ PostgreSQL
+    # Cache để không đọc lại JDBC mỗi micro-batch
     dim_users = (
         spark.read.format("jdbc")
         .option("url", PG_JDBC_URL).option("dbtable", "dim_users")
         .option("user", PG_USER).option("password", PG_PASSWORD)
         .option("driver", "org.postgresql.Driver").load()
         .select("user_id", "user_segment")
+        .cache()
     )
-    
-    # Lấy thông tin Hệ số Thưởng của Loại giao dịch (Reward Multiplier)
-    dim_txn_type = (
+    dim_users.count()  # Force materialization vào memory
+    logger.info(f"[CACHE] dim_users loaded: {dim_users.count():,} rows")
+
+    # Lấy Hệ số Thưởng - Broadcast vì chỉ 10 rows
+    dim_txn_type = broadcast(
         spark.read.format("jdbc")
         .option("url", PG_JDBC_URL).option("dbtable", "dim_transaction_type")
         .option("user", PG_USER).option("password", PG_PASSWORD)
@@ -236,57 +246,47 @@ def build_fact_df(spark: SparkSession, parsed_df: DataFrame) -> DataFrame:
 
 # ─── Sink 1: PostgreSQL (Primary, real-time) ─────────────────────
 def write_to_postgres(batch_df: DataFrame, batch_id: int, row_count: int):
-    """Ghi batch vào PostgreSQL bằng JDBC - UPSERT qua temp table."""
+    """Ghi batch vào PostgreSQL bằng psycopg2 execute_values (FAST UPSERT)."""
     t0 = time.time()
 
-    # Ghi vào staging table tạm, rồi UPSERT vào fact_transactions
-    staging = f"fact_transactions_staging_{batch_id % 5}"  # rotate 5 staging tables
+    # Collect rows từ Spark về Python driver (OK cho batch nhỏ ≤ 500 rows)
+    rows = batch_df.collect()
 
-    (
-        batch_df.write
-        .format("jdbc")
-        .option("url", PG_JDBC_URL)
-        .option("dbtable", staging)
-        .option("user", PG_USER)
-        .option("password", PG_PASSWORD)
-        .option("driver", "org.postgresql.Driver")
-        .mode("overwrite")
-        .save()
-    )
+    # Cột theo thứ tự schema fact_transactions
+    cols = [
+        "transaction_id", "account_id", "merchant_id", "type_id",
+        "location_id", "channel_id", "date_key", "time_key",
+        "transaction_time", "amount", "reward_points", "type", "step",
+        "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest",
+        "isFraud", "isFlaggedFraud", "ip_address", "user_id"
+    ]
 
-    # UPSERT từ staging -> fact_transactions (dùng psycopg2)
+    # Chuyển Spark Row → tuple
+    values = []
+    for r in rows:
+        values.append(tuple(r[c] for c in cols))
+
+    # Direct UPSERT bằng psycopg2.extras.execute_values
+    import psycopg2.extras
     conn = psycopg2.connect(
         host=PG_HOST, port=PG_PORT, dbname=PG_DB,
         user=PG_USER, password=PG_PASSWORD
     )
     with conn.cursor() as cur:
-        # UPSERT: INSERT ... ON CONFLICT DO UPDATE
-        cur.execute(f"""
-            INSERT INTO fact_transactions
-                SELECT * FROM {staging}
+        insert_sql = """
+            INSERT INTO fact_transactions (
+                transaction_id, account_id, merchant_id, type_id,
+                location_id, channel_id, date_key, time_key,
+                transaction_time, amount, reward_points, type, step,
+                "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest",
+                "isFraud", "isFlaggedFraud", ip_address, user_id
+            ) VALUES %s
             ON CONFLICT (transaction_id) DO UPDATE SET
-                account_id       = EXCLUDED.account_id,
-                merchant_id      = EXCLUDED.merchant_id,
-                user_id          = EXCLUDED.user_id,
-                type_id          = EXCLUDED.type_id,
-                location_id      = EXCLUDED.location_id,
-                channel_id       = EXCLUDED.channel_id,
-                date_key         = EXCLUDED.date_key,
-                time_key         = EXCLUDED.time_key,
-                transaction_time = EXCLUDED.transaction_time,
-                amount           = EXCLUDED.amount,
-                reward_points    = EXCLUDED.reward_points,
-                type             = EXCLUDED.type,
-                step             = EXCLUDED.step,
-                "oldbalanceOrg"  = EXCLUDED."oldbalanceOrg",
-                "newbalanceOrig" = EXCLUDED."newbalanceOrig",
-                "oldbalanceDest" = EXCLUDED."oldbalanceDest",
-                "newbalanceDest" = EXCLUDED."newbalanceDest",
-                "isFraud"        = EXCLUDED."isFraud",
-                "isFlaggedFraud" = EXCLUDED."isFlaggedFraud",
-                ip_address       = EXCLUDED.ip_address
-        """)
-        cur.execute(f"DROP TABLE IF EXISTS {staging}")
+                amount       = EXCLUDED.amount,
+                reward_points = EXCLUDED.reward_points,
+                transaction_time = EXCLUDED.transaction_time
+        """
+        psycopg2.extras.execute_values(cur, insert_sql, values, page_size=500)
     conn.commit()
     conn.close()
 
@@ -356,31 +356,41 @@ def write_to_bq_backup(batch_df: DataFrame, batch_id: int, row_count: int):
 
 
 # ─── foreachBatch callback (Dual Sink) ───────────────────────────
+# BigQuery backup chỉ chạy mỗi N batches để không block PostgreSQL real-time
+BQ_BACKUP_INTERVAL = int(os.getenv("BQ_BACKUP_INTERVAL", "20"))  # Mỗi 20 batches mới backup BQ
+
 def dual_sink_batch(batch_df: DataFrame, batch_id: int):
     row_count = batch_df.count()
 
     if row_count == 0:
-        logger.info(f"[Batch {batch_id}] [INFO] 0 rows - skip.")
-        return
+        return  # Skip silent để giảm log noise ở tốc độ cao
 
-    logger.info(f"[Batch {batch_id}] [INFO] Processing {row_count:,} rows...")
+    t_start = time.time()
 
     # Cache để tránh tính lại 2 lần
     batch_df.cache()
 
-    # Sink 1: PostgreSQL (primary)
+    # Sink 1: PostgreSQL (primary, real-time)
     try:
         write_to_postgres(batch_df, batch_id, row_count)
     except Exception as e:
         logger.error(f"[Batch {batch_id}] [ERRO] PostgreSQL sink lỗi: {e}")
 
-    # Sink 2: BigQuery backup
-    try:
-        write_to_bq_backup(batch_df, batch_id, row_count)
-    except Exception as e:
-        logger.warning(f"[Batch {batch_id}] [WARN] BigQuery backup lỗi: {e}")
+    # Sink 2: BigQuery backup (chỉ mỗi N batches để không block real-time)
+    if batch_id % BQ_BACKUP_INTERVAL == 0:
+        try:
+            write_to_bq_backup(batch_df, batch_id, row_count)
+        except Exception as e:
+            logger.warning(f"[Batch {batch_id}] [WARN] BigQuery backup lỗi: {e}")
 
     batch_df.unpersist()
+
+    latency_ms = int((time.time() - t_start) * 1000)
+    logger.info(
+        f"[Batch {batch_id}] rows={row_count:,} | "
+        f"latency={latency_ms}ms | "
+        f"{'+ BQ' if batch_id % BQ_BACKUP_INTERVAL == 0 else 'PG only'}"
+    )
 
 
 # ─── Main ────────────────────────────────────────────────────────
@@ -412,7 +422,7 @@ def main():
         .option("subscribe", KAFKA_TOPIC)
         .option("startingOffsets", "earliest")
         .option("failOnDataLoss", "false")
-        .option("maxOffsetsPerTrigger", "50000")
+        .option("maxOffsetsPerTrigger", "500")   # Giới hạn nhỏ → batch nhỏ → latency thấp
         .load()
     )
 
@@ -427,13 +437,16 @@ def main():
     # 3. Transform & Stream-Static Join
     fact_df = build_fact_df(spark, parsed_df)
 
-    # 4. Dual Sink via foreachBatch
+    # 4. Dual Sink via foreachBatch — Trigger mỗi 200ms cho near real-time
+    TRIGGER_INTERVAL = os.getenv("SPARK_TRIGGER_INTERVAL", "5 seconds")
+    logger.info(f"[CONFIG] Trigger: {TRIGGER_INTERVAL} | maxOffsets: 500 | BQ backup mỗi {BQ_BACKUP_INTERVAL} batches")
+
     query = (
         fact_df.writeStream
         .outputMode("append")
         .foreachBatch(dual_sink_batch)
-        .trigger(processingTime="15 seconds")
-        .option("checkpointLocation", "/tmp/spark_checkpoint_dual_sink_v2")
+        .trigger(processingTime=TRIGGER_INTERVAL)
+        .option("checkpointLocation", "/tmp/spark_checkpoint_dual_sink_v3")
         .start()
     )
 

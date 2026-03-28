@@ -30,15 +30,15 @@ if not BQ_PROJECT_ID:
     sys.exit(1)
 
 TABLES_TO_SYNC = [
-    # "dim_users",
-    # "dim_merchants", 
-    # "dim_transaction_type",
-    # "dim_location",
-    # "dim_date",
-    # "dim_time",
-    # "dim_channel",
-    # "dim_account",
-    "fact_transactions"
+    "dim_users",
+    "dim_merchants", 
+    "dim_transaction_type",
+    "dim_location",
+    "dim_date",
+    "dim_time",
+    "dim_channel",
+    "dim_account",
+    # "fact_transactions"
 ]
 
 def sync_table(table_name, db_url):

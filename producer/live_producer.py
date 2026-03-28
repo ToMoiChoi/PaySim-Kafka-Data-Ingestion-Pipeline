@@ -99,14 +99,14 @@ def map_binance_trade_to_event(trade: dict, valid_users: list,
       - b: buyer order ID
       - a: seller order ID (ask)
     """
-    trade_id    = trade["t"]          # Trade ID thật từ Binance
-    price       = float(trade["p"])   # Giá thật (USD)
-    quantity    = float(trade["q"])   # Khối lượng thật
-    trade_time  = trade["T"]          # Timestamp thật (ms)
-    symbol      = trade["s"]          # Ví dụ: "BTCUSDT"
-    is_maker    = trade["m"]          # Buyer is maker?
-    buyer_id    = trade["b"]          # Buyer order ID thật
-    seller_id   = trade["a"]          # Seller order ID thật (ask)
+    trade_id    = trade.get("t", int(time.time() * 1000))
+    price       = float(trade.get("p", 0.0))
+    quantity    = float(trade.get("q", 0.0))
+    trade_time  = trade.get("T", int(time.time() * 1000))
+    symbol      = trade.get("s", "UNKNOWN")
+    is_maker    = trade.get("m", False)
+    buyer_id    = trade.get("b", trade_id)  # Fallback to trade_id if missing
+    seller_id   = trade.get("a", trade_id)  # Fallback to trade_id if missing
 
     # 1. Transaction ID: UUID dựa trên trade_id thật (deterministic)
     transaction_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"binance.trade.{trade_id}"))
