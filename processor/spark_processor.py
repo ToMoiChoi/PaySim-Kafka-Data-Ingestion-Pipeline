@@ -356,18 +356,15 @@ def write_to_bq_backup(batch_df: DataFrame, batch_id: int, row_count: int):
 
 
 # ─── foreachBatch callback (Dual Sink) ───────────────────────────
-# BigQuery backup chỉ chạy mỗi N batches để không block PostgreSQL real-time
-BQ_BACKUP_INTERVAL = int(os.getenv("BQ_BACKUP_INTERVAL", "20"))  # Mỗi 20 batches mới backup BQ
+# BigQuery backup chạy ASYNC trong background thread
+import threading
 
 def dual_sink_batch(batch_df: DataFrame, batch_id: int):
     row_count = batch_df.count()
-
     if row_count == 0:
-        return  # Skip silent để giảm log noise ở tốc độ cao
+        return
 
     t_start = time.time()
-
-    # Cache để tránh tính lại 2 lần
     batch_df.cache()
 
     # Sink 1: PostgreSQL (primary, real-time)
@@ -376,21 +373,52 @@ def dual_sink_batch(batch_df: DataFrame, batch_id: int):
     except Exception as e:
         logger.error(f"[Batch {batch_id}] [ERRO] PostgreSQL sink lỗi: {e}")
 
-    # Sink 2: BigQuery backup (chỉ mỗi N batches để không block real-time)
-    if batch_id % BQ_BACKUP_INTERVAL == 0:
-        try:
-            write_to_bq_backup(batch_df, batch_id, row_count)
-        except Exception as e:
-            logger.warning(f"[Batch {batch_id}] [WARN] BigQuery backup lỗi: {e}")
+    # Sink 2: BigQuery — collect rồi chạy async thread
+    try:
+        bq_data = [r.asDict() for r in batch_df.collect()]
+        threading.Thread(
+            target=_bq_async_upload,
+            args=(bq_data, batch_id, row_count),
+            daemon=True
+        ).start()
+    except Exception as e:
+        logger.warning(f"[Batch {batch_id}] [WARN] BQ collect lỗi: {e}")
 
     batch_df.unpersist()
-
     latency_ms = int((time.time() - t_start) * 1000)
-    logger.info(
-        f"[Batch {batch_id}] rows={row_count:,} | "
-        f"latency={latency_ms}ms | "
-        f"{'+ BQ' if batch_id % BQ_BACKUP_INTERVAL == 0 else 'PG only'}"
-    )
+    logger.info(f"[Batch {batch_id}] rows={row_count:,} | latency={latency_ms}ms | PG done, BQ async")
+
+
+def _bq_async_upload(rows_dicts, batch_id, row_count):
+    """Background: pandas → Parquet → BigQuery Load Job (Sandbox compatible)."""
+    if not BQ_PROJECT_ID:
+        return
+    try:
+        import pandas as _pd
+        from google.cloud import bigquery
+        t0 = time.time()
+
+        pdf = _pd.DataFrame(rows_dicts)
+        os.makedirs(BQ_PARQUET_DIR, exist_ok=True)
+        pq_path = os.path.join(BQ_PARQUET_DIR, f"batch_{batch_id}.parquet")
+        pdf.to_parquet(pq_path, index=False)
+
+        client = bigquery.Client(project=BQ_PROJECT_ID)
+        table_id = f"{BQ_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE_FACT}"
+        job_config = bigquery.LoadJobConfig(
+            write_disposition="WRITE_APPEND",
+            source_format=bigquery.SourceFormat.PARQUET,
+            schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
+        )
+        with open(pq_path, "rb") as f:
+            job = client.load_table_from_file(f, table_id, job_config=job_config)
+            job.result()
+        os.remove(pq_path)
+
+        elapsed = int((time.time() - t0) * 1000)
+        logger.info(f"[Batch {batch_id}] --> BigQuery ASYNC | rows={row_count:,} | latency={elapsed}ms")
+    except Exception as e:
+        logger.warning(f"[BQ Async] Batch {batch_id}: {e}")
 
 
 # ─── Main ────────────────────────────────────────────────────────
