@@ -355,10 +355,17 @@ def write_to_bq_backup(batch_df: DataFrame, batch_id: int, row_count: int):
 
 
 # ─── foreachBatch callback (Dual Sink) ───────────────────────────
-# BigQuery backup chạy ASYNC trong background thread
 import threading
 
+# Buffer Queue cho BigQuery để giảm gánh nặng API (Tránh cạn kiệt 1,500 Load Jobs / Ngày)
+BQ_BUFFER = []
+BQ_BUFFER_LOCK = threading.Lock()
+LAST_BQ_UPLOAD_TIME = time.time()
+BQ_UPLOAD_INTERVAL_SEC = 10  # Đẩy lên BQ mỗi 10 giây
+BQ_UPLOAD_ROWS_LIMIT = 5000  # Hoặc khi đủ 5000 báo cáo giao dịch
+
 def dual_sink_batch(batch_df: DataFrame, batch_id: int):
+    global LAST_BQ_UPLOAD_TIME
     t_start = time.time()
     
     # Gọi collect() 1 lần duy nhất để kích hoạt Pipeline (không cần count hay cache)
@@ -368,20 +375,35 @@ def dual_sink_batch(batch_df: DataFrame, batch_id: int):
     if row_count == 0:
         return
 
-    # Sink 1: PostgreSQL (primary, real-time)
+    # Sink 1: PostgreSQL (primary, real-time 100%)
     try:
         write_to_postgres(rows, batch_id, row_count)
     except Exception as e:
         logger.error(f"[Batch {batch_id}] [ERRO] PostgreSQL sink lỗi: {e}")
 
-    # Sink 2: BigQuery — lấy từ rows và chạy async thread
+    # Sink 2: BigQuery — Đẩy vào Buffer, gom lô thật lớn mới upload
     try:
         bq_data = [r.asDict() for r in rows]
-        threading.Thread(
-            target=_bq_async_upload,
-            args=(bq_data, batch_id, row_count),
-            daemon=True
-        ).start()
+        
+        with BQ_BUFFER_LOCK:
+            BQ_BUFFER.extend(bq_data)
+            current_buffer_size = len(BQ_BUFFER)
+            time_since_last_upload = time.time() - LAST_BQ_UPLOAD_TIME
+
+        # Điều kiện xả Buffer (Flush) lên BigQuery
+        if current_buffer_size >= BQ_UPLOAD_ROWS_LIMIT or time_since_last_upload >= BQ_UPLOAD_INTERVAL_SEC:
+            with BQ_BUFFER_LOCK:
+                upload_data = BQ_BUFFER.copy()
+                BQ_BUFFER.clear()
+                LAST_BQ_UPLOAD_TIME = time.time()
+                
+            if len(upload_data) > 0:
+                logger.info(f"[BQ Buffer Flush] Gom được {len(upload_data):,} dòng trong {int(time_since_last_upload)} giây. Bắt đầu upload...")
+                threading.Thread(
+                    target=_bq_async_upload,
+                    args=(upload_data, batch_id, len(upload_data)),
+                    daemon=True
+                ).start()
     except Exception as e:
         logger.warning(f"[Batch {batch_id}] [WARN] BQ mapping lỗi: {e}")
 
