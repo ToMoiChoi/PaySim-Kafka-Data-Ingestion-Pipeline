@@ -245,12 +245,11 @@ def build_fact_df(spark: SparkSession, parsed_df: DataFrame) -> DataFrame:
 
 
 # ─── Sink 1: PostgreSQL (Primary, real-time) ─────────────────────
-def write_to_postgres(batch_df: DataFrame, batch_id: int, row_count: int):
+def write_to_postgres(rows: list, batch_id: int, row_count: int):
     """Ghi batch vào PostgreSQL bằng psycopg2 execute_values (FAST UPSERT)."""
     t0 = time.time()
 
-    # Collect rows từ Spark về Python driver (OK cho batch nhỏ ≤ 500 rows)
-    rows = batch_df.collect()
+    # Dùng trực tiếp list Rows đã collect từ Spark Driver
 
     # Cột theo thứ tự schema fact_transactions
     cols = [
@@ -360,31 +359,32 @@ def write_to_bq_backup(batch_df: DataFrame, batch_id: int, row_count: int):
 import threading
 
 def dual_sink_batch(batch_df: DataFrame, batch_id: int):
-    row_count = batch_df.count()
+    t_start = time.time()
+    
+    # Gọi collect() 1 lần duy nhất để kích hoạt Pipeline (không cần count hay cache)
+    rows = batch_df.collect()
+    row_count = len(rows)
+
     if row_count == 0:
         return
 
-    t_start = time.time()
-    batch_df.cache()
-
     # Sink 1: PostgreSQL (primary, real-time)
     try:
-        write_to_postgres(batch_df, batch_id, row_count)
+        write_to_postgres(rows, batch_id, row_count)
     except Exception as e:
         logger.error(f"[Batch {batch_id}] [ERRO] PostgreSQL sink lỗi: {e}")
 
-    # Sink 2: BigQuery — collect rồi chạy async thread
+    # Sink 2: BigQuery — lấy từ rows và chạy async thread
     try:
-        bq_data = [r.asDict() for r in batch_df.collect()]
+        bq_data = [r.asDict() for r in rows]
         threading.Thread(
             target=_bq_async_upload,
             args=(bq_data, batch_id, row_count),
             daemon=True
         ).start()
     except Exception as e:
-        logger.warning(f"[Batch {batch_id}] [WARN] BQ collect lỗi: {e}")
+        logger.warning(f"[Batch {batch_id}] [WARN] BQ mapping lỗi: {e}")
 
-    batch_df.unpersist()
     latency_ms = int((time.time() - t_start) * 1000)
     logger.info(f"[Batch {batch_id}] rows={row_count:,} | latency={latency_ms}ms | PG done, BQ async")
 
@@ -399,9 +399,25 @@ def _bq_async_upload(rows_dicts, batch_id, row_count):
         t0 = time.time()
 
         pdf = _pd.DataFrame(rows_dicts)
+        
+        # Ép kiểu Decimal (từ Spark) ->  Float64 để khớp với BigQuery schema (FLOAT64)
+        float_cols = ["amount", "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest"]
+        for c in float_cols:
+            if c in pdf.columns:
+                pdf[c] = pdf[c].astype(float)
+                
+        # Xóa đoạn ép sang str, giữ nguyên datetime nhưng ép Parquet lưu dạng microseconds
+        # Thay vì nanoseconds mặc định của pyarrow (BigQuery không đọc được)
         os.makedirs(BQ_PARQUET_DIR, exist_ok=True)
         pq_path = os.path.join(BQ_PARQUET_DIR, f"batch_{batch_id}.parquet")
-        pdf.to_parquet(pq_path, index=False)
+        
+        pdf.to_parquet(
+            pq_path, 
+            index=False, 
+            engine='pyarrow', 
+            coerce_timestamps='us',
+            allow_truncated_timestamps=True
+        )
 
         client = bigquery.Client(project=BQ_PROJECT_ID)
         table_id = f"{BQ_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE_FACT}"
@@ -466,8 +482,8 @@ def main():
     fact_df = build_fact_df(spark, parsed_df)
 
     # 4. Dual Sink via foreachBatch — Trigger mỗi 200ms cho near real-time
-    TRIGGER_INTERVAL = os.getenv("SPARK_TRIGGER_INTERVAL", "5 seconds")
-    logger.info(f"[CONFIG] Trigger: {TRIGGER_INTERVAL} | maxOffsets: 500 | BQ backup mỗi {BQ_BACKUP_INTERVAL} batches")
+    TRIGGER_INTERVAL = os.getenv("SPARK_TRIGGER_INTERVAL", "200 milliseconds")
+    logger.info(f"[CONFIG] Trigger: {TRIGGER_INTERVAL} | maxOffsets: 500 | BQ: async every batch")
 
     query = (
         fact_df.writeStream
