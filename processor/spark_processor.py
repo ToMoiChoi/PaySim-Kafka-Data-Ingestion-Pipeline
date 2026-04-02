@@ -1,14 +1,12 @@
 """
 processor/spark_processor.py - Dual-Sink Spark Structured Streaming
 ====================================================================
-Luồng xử lý:
-  1. Đọc stream từ Kafka topic `payment_events`.
-  2. Parse JSON schema.
-  3. Ép kiểu event_timestamp -> TimestampType.
-  4. Watermark (5 phút) + dropDuplicates(transaction_id) - Kiểm soát trùng lặp.
-  5. Tính reward_points = int(amount × 0.01).
-  6. Transform -> Star Schema (fact_transactions).
-  7. foreachBatch - Dual Sink:
+Thiết kế pipeline xử lý dữ liệu streaming từ Binance WebSocket:
+  1. Đọc stream từ Kafka topic `payment_events_v3`.
+  2. Parse JSON schema nguyên bản (Không có Fake Data).
+  3. Watermark (5 phút) + dropDuplicates(transaction_id) - Kiểm soát trùng lặp tự nhiên.
+  4. Transform -> Schema fact_binance_trades.
+  5. foreachBatch - Dual Sink:
        a. [PRIMARY]  Ghi vào PostgreSQL  (UPSERT qua JDBC, real-time).
        b. [BACKUP]   Ghi Parquet -> Load Job lên BigQuery (batch, miễn phí Sandbox).
 """
@@ -16,17 +14,15 @@ Luồng xử lý:
 import os
 import sys
 import time
-import random
 import logging
 
 import psycopg2
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import (
-    from_json, col, expr, udf, when, current_timestamp, date_format,
-    array, lit, rand, floor
+    from_json, col, expr, when, current_timestamp, date_format
 )
 from pyspark.sql.types import (
-    StructType, StructField, StringType, IntegerType, DoubleType
+    StructType, StructField, StringType, DoubleType, BooleanType, LongType
 )
 from dotenv import load_dotenv
 
@@ -42,7 +38,7 @@ logger = logging.getLogger("SparkDualSink")
 load_dotenv()
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-KAFKA_TOPIC             = os.getenv("KAFKA_TOPIC", "payment_events")
+KAFKA_TOPIC             = os.getenv("KAFKA_TOPIC", "payment_events_v3")
 
 # PostgreSQL (Primary)
 PG_HOST     = os.getenv("POSTGRES_HOST", "localhost")
@@ -55,45 +51,24 @@ PG_JDBC_URL = f"jdbc:postgresql://{PG_HOST}:{PG_PORT}/{PG_DB}"
 # BigQuery (Backup)
 BQ_PROJECT_ID = os.getenv("BQ_PROJECT_ID", "")
 BQ_DATASET    = os.getenv("BQ_DATASET", "paysim_dw")
-BQ_TABLE_FACT = "fact_transactions"
+BQ_TABLE_FACT = "fact_binance_trades"
 GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 BQ_PARQUET_DIR = os.getenv("BQ_PARQUET_BACKUP_DIR", "/tmp/bq_backup")
 
-# Location pool - 34 tỉnh/thành Việt Nam
-LOCATION_IDS = [
-    # Bắc
-    "LOC_VN_HNI", "LOC_VN_HPG", "LOC_VN_HGG", "LOC_VN_CBG",
-    "LOC_VN_LCI", "LOC_VN_LSN", "LOC_VN_TQG", "LOC_VN_TNG",
-    "LOC_VN_BGG", "LOC_VN_PTH", "LOC_VN_BNH", "LOC_VN_HYN",
-    "LOC_VN_HDG", "LOC_VN_NDH",
-    # Trung
-    "LOC_VN_THA", "LOC_VN_NAN", "LOC_VN_HTH", "LOC_VN_DNG",
-    "LOC_VN_HUE", "LOC_VN_QNM", "LOC_VN_QNG", "LOC_VN_BDH",
-    "LOC_VN_PYN", "LOC_VN_KHA", "LOC_VN_DLK", "LOC_VN_LDG",
-    # Nam
-    "LOC_VN_HCM", "LOC_VN_CTH", "LOC_VN_BPC", "LOC_VN_TNH",
-    "LOC_VN_BDG", "LOC_VN_DNI", "LOC_VN_BVT",
-]
-
-
-# ─── Kafka Schema ────────────────────────────────────────────────    # 3. Phân tích cú pháp JSON
-payment_schema = StructType([
-    StructField("step",            IntegerType(), True),
-    StructField("type",            StringType(),  True),
-    StructField("amount",          DoubleType(),  True),
-    StructField("nameOrig",        StringType(),  True),
-    StructField("oldbalanceOrg",   DoubleType(),  True),
-    StructField("newbalanceOrig",  DoubleType(),  True),
-    StructField("nameDest",        StringType(),  True),
-    StructField("oldbalanceDest",  DoubleType(),  True),
-    StructField("newbalanceDest",  DoubleType(),  True),
-    StructField("isFraud",         IntegerType(), True),
-    StructField("isFlaggedFraud",  IntegerType(), True),
+# ─── Kafka Schema ────────────────────────────────────────────────
+binance_schema = StructType([
     StructField("transaction_id",  StringType(),  True),
+    StructField("trade_id",        LongType(),    True),
+    StructField("crypto_symbol",   StringType(),  True),
     StructField("event_timestamp", StringType(),  True),
-    StructField("account_id",      StringType(),  True),
-    StructField("channel_id",      StringType(),  True),
-    StructField("ip_address",      StringType(),  True)
+    StructField("price",           DoubleType(),  True),
+    StructField("quantity",        DoubleType(),  True),
+    StructField("amount_usd",      DoubleType(),  True),
+    StructField("is_buyer_maker",  BooleanType(), True),
+    StructField("volume_category", StringType(),  True),
+    StructField("is_anomaly",      BooleanType(), True),
+    StructField("buyer_order_id",  LongType(),    True),
+    StructField("seller_order_id", LongType(),    True)
 ])
 
 
@@ -111,7 +86,7 @@ def create_spark_session() -> SparkSession:
 
     builder = (
         SparkSession.builder
-        .appName("PaySim_DualSink_Streaming")
+        .appName("Binance_Crypto_Streaming")
         .master("local[*]")
         .config(
             "spark.jars.packages",
@@ -119,9 +94,9 @@ def create_spark_session() -> SparkSession:
             "org.postgresql:postgresql:42.7.3"
         )
         .config("spark.sql.shuffle.partitions", "2")
-        .config("spark.driver.memory", "3g")  # <-- Tăng lên 3g để chứa broadcast dim_users
-        .config("spark.executor.memory", "3g") # <-- Tăng lên 3g
-        .config("spark.memory.fraction", "0.6") # Giữ heap memory gọn nhẹ
+        .config("spark.driver.memory", "2g")
+        .config("spark.executor.memory", "2g")
+        .config("spark.memory.fraction", "0.6")
         .config("spark.sql.execution.arrow.pyspark.enabled", "true")
         # Fix BlockManagerId NullPointerException on Windows
         .config("spark.driver.host", "127.0.0.1")
@@ -132,14 +107,18 @@ def create_spark_session() -> SparkSession:
 
 
 def build_fact_df(spark: SparkSession, parsed_df: DataFrame) -> DataFrame:
-
+    """
+    Biến đổi dữ liệu gốc thành Schema lưu trữ.
+    Bao gồm cơ chế Tự Động Kiểm Soát Trùng Lặp (Deduplication) dưa trên Idempotent UUID.
+    """
     # 1. Cast event_timestamp string to native TimestampType
     typed_df = parsed_df.withColumn(
         "event_timestamp", expr("to_timestamp(event_timestamp)")
     )
 
     # 2. Watermark & Drop Duplicates (Stateful Streaming)
-    # Khử trùng lặp các giao dịch gửi đúp (cùng transaction_id) trong window 5 phút
+    # Khử trùng lặp tự nhiên khi Binance Replay giao dịch cũ lúc reconnect.
+    # Do transaction_id được sinh tĩnh (deterministic) từ trade_id, UUID sẽ giống hệt nhau.
     clean_df = (
         typed_df
         .withWatermark("event_timestamp", "5 minutes")
@@ -149,96 +128,26 @@ def build_fact_df(spark: SparkSession, parsed_df: DataFrame) -> DataFrame:
     # 3. Data Formatting & Type Casting
     base_df = (
         clean_df
-        .withColumnRenamed("nameOrig",  "user_id")
-        .withColumnRenamed("nameDest",  "merchant_id")
-        .withColumn("transaction_time",
+        .withColumn("trade_time",
             when(col("event_timestamp").isNull(), current_timestamp())
             .otherwise(col("event_timestamp"))
         )
         # Sinh date_key (yyyyMMdd)
-        .withColumn("date_key", date_format(col("transaction_time"), "yyyyMMdd").cast("long"))
-        # Sinh time_key (Thí dụ 14:30 -> 1430)
-        .withColumn("time_key", (expr("hour(transaction_time)") * 100 + expr("minute(transaction_time)")).cast("long"))
-        .withColumn("amount",          col("amount").cast("decimal(38,9)"))
-        .withColumn("oldbalanceOrg",   col("oldbalanceOrg").cast("decimal(38,9)"))
-        .withColumn("newbalanceOrig",  col("newbalanceOrig").cast("decimal(38,9)"))
-        .withColumn("oldbalanceDest",  col("oldbalanceDest").cast("decimal(38,9)"))
-        .withColumn("newbalanceDest",  col("newbalanceDest").cast("decimal(38,9)"))
-        # Type ID mapping: Hỗ trợ cả batch (CSV) và live (Binance) types
-        .withColumn("type_id",
-            # --- Legacy types (từ CSV PaySim batch) ---
-            when(col("type") == "PAYMENT",  "TYP_PAYMENT")
-            .when(col("type") == "TRANSFER","TYP_TRANSFER")
-            .when(col("type") == "CASH_OUT","TYP_CASH_OUT")
-            .when(col("type") == "DEBIT",   "TYP_DEBIT")
-            .when(col("type") == "CASH_IN", "TYP_CASH_IN")
-            # --- Crypto types (từ Binance live stream) ---
-            .when(col("type") == "SPOT_BUY",    "TYP_SPOT_BUY")
-            .when(col("type") == "SPOT_SELL",   "TYP_SPOT_SELL")
-            .when(col("type") == "LARGE_TRADE", "TYP_LARGE_TRADE")
-            .when(col("type") == "MICRO_TRADE", "TYP_MICRO_TRADE")
-            .when(col("type") == "WHALE_ALERT", "TYP_WHALE_ALERT")
-            .otherwise("TYP_PAYMENT")
-        )
+        .withColumn("date_key", date_format(col("trade_time"), "yyyyMMdd").cast("long"))
+        # Sinh time_key (Ví dụ 14:30 -> 1430)
+        .withColumn("time_key", (expr("hour(trade_time)") * 100 + expr("minute(trade_time)")).cast("long"))
+        .withColumn("price",      col("price").cast("decimal(38,9)"))
+        .withColumn("quantity",   col("quantity").cast("decimal(38,9)"))
+        .withColumn("amount_usd", col("amount_usd").cast("decimal(38,9)"))
     )
 
-    # 4. Stream-Static Joins (Tích hợp Dữ liệu Tham chiếu)
-    from pyspark.sql.functions import broadcast
-
-    # Lấy thông tin Hạng người dùng (User Segment) từ PostgreSQL
-    # Cache để không đọc lại JDBC mỗi micro-batch
-    dim_users = (
-        spark.read.format("jdbc")
-        .option("url", PG_JDBC_URL).option("dbtable", "dim_users")
-        .option("user", PG_USER).option("password", PG_PASSWORD)
-        .option("driver", "org.postgresql.Driver").load()
-        .select("user_id", "user_segment")
-        .cache()
-    )
-    dim_users.count()  # Force materialization vào memory
-    logger.info(f"[CACHE] dim_users loaded: {dim_users.count():,} rows")
-
-    # Lấy Hệ số Thưởng - Broadcast vì chỉ 10 rows
-    dim_txn_type = broadcast(
-        spark.read.format("jdbc")
-        .option("url", PG_JDBC_URL).option("dbtable", "dim_transaction_type")
-        .option("user", PG_USER).option("password", PG_PASSWORD)
-        .option("driver", "org.postgresql.Driver").load()
-        .select("type_id", "reward_multiplier")
-    )
-
-    # Nối (Join) luồng stream với batch data
-    joined_df = base_df.join(dim_users, on="user_id", how="left")
-    joined_df = joined_df.join(dim_txn_type, on="type_id", how="left")
-
-    # 5. Logic Nghiệp vụ Core: Tính Điểm Thưởng (Reward Points Calculation)
-    # Điểm thưởng = Số tiền * Hệ số loại GD * Hệ số hạng khách hàng
-    # Standard x1, Gold x1.5, Diamond x2
-    fact_df = joined_df.withColumn(
-        "user_multiplier",
-        when(col("user_segment") == "Diamond", 2.0)
-        .when(col("user_segment") == "Gold", 1.5)
-        .otherwise(1.0)
-    ).withColumn(
-        "reward_points",
-        (col("amount") * col("reward_multiplier") * col("user_multiplier")).cast("long")
-    )
-
-    # 6. Gán Location ngẫu nhiên (chỉ để phục vụ Map Dashboard nếu chưa có trong source)
-    
-    # Create an array column of location IDs
-    loc_array = array(*[lit(loc) for loc in LOCATION_IDS])
-    loc_count = len(LOCATION_IDS)
-    
-    final_fact_df = fact_df.withColumn(
-        "location_id", 
-        loc_array.getItem(floor(rand() * loc_count).cast("int"))
-    ).select(
-        "transaction_id", "account_id", "merchant_id",
-        "type_id", "location_id", "channel_id", "date_key", "time_key",
-        "transaction_time", "amount", "reward_points",
-        "type", "step", "oldbalanceOrg", "newbalanceOrig",
-        "oldbalanceDest", "newbalanceDest", "isFraud", "isFlaggedFraud", "ip_address", "user_id"
+    # 4. Filter Schema Chuẩn fact_binance_trades
+    final_fact_df = base_df.select(
+        "transaction_id", "trade_id", "crypto_symbol",
+        "date_key", "time_key", "trade_time", 
+        "price", "quantity", "amount_usd", 
+        "is_buyer_maker", "volume_category", "is_anomaly",
+        "buyer_order_id", "seller_order_id"
     )
 
     return final_fact_df
@@ -249,23 +158,19 @@ def write_to_postgres(rows: list, batch_id: int, row_count: int):
     """Ghi batch vào PostgreSQL bằng psycopg2 execute_values (FAST UPSERT)."""
     t0 = time.time()
 
-    # Dùng trực tiếp list Rows đã collect từ Spark Driver
-
-    # Cột theo thứ tự schema fact_transactions
+    # Cột theo thứ tự schema fact_binance_trades
     cols = [
-        "transaction_id", "account_id", "merchant_id", "type_id",
-        "location_id", "channel_id", "date_key", "time_key",
-        "transaction_time", "amount", "reward_points", "type", "step",
-        "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest",
-        "isFraud", "isFlaggedFraud", "ip_address", "user_id"
+        "transaction_id", "trade_id", "crypto_symbol",
+        "date_key", "time_key", "trade_time",
+        "price", "quantity", "amount_usd",
+        "is_buyer_maker", "volume_category", "is_anomaly",
+        "buyer_order_id", "seller_order_id"
     ]
 
-    # Chuyển Spark Row → tuple
     values = []
     for r in rows:
         values.append(tuple(r[c] for c in cols))
 
-    # Direct UPSERT bằng psycopg2.extras.execute_values
     import psycopg2.extras
     conn = psycopg2.connect(
         host=PG_HOST, port=PG_PORT, dbname=PG_DB,
@@ -273,17 +178,18 @@ def write_to_postgres(rows: list, batch_id: int, row_count: int):
     )
     with conn.cursor() as cur:
         insert_sql = """
-            INSERT INTO fact_transactions (
-                transaction_id, account_id, merchant_id, type_id,
-                location_id, channel_id, date_key, time_key,
-                transaction_time, amount, reward_points, type, step,
-                "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest",
-                "isFraud", "isFlaggedFraud", ip_address, user_id
+            INSERT INTO fact_binance_trades (
+                transaction_id, trade_id, crypto_symbol,
+                date_key, time_key, trade_time,
+                price, quantity, amount_usd,
+                is_buyer_maker, volume_category, is_anomaly,
+                buyer_order_id, seller_order_id
             ) VALUES %s
             ON CONFLICT (transaction_id) DO UPDATE SET
-                amount       = EXCLUDED.amount,
-                reward_points = EXCLUDED.reward_points,
-                transaction_time = EXCLUDED.transaction_time
+                price = EXCLUDED.price,
+                quantity = EXCLUDED.quantity,
+                amount_usd = EXCLUDED.amount_usd,
+                is_anomaly = EXCLUDED.is_anomaly
         """
         psycopg2.extras.execute_values(cur, insert_sql, values, page_size=500)
     conn.commit()
@@ -297,67 +203,8 @@ def write_to_postgres(rows: list, batch_id: int, row_count: int):
 
 
 # ─── Sink 2: BigQuery Backup (batch Parquet -> Load Job) ──────────
-def write_to_bq_backup(batch_df: DataFrame, batch_id: int, row_count: int):
-    """Ghi Parquet file -> BigQuery Load Job (miễn phí Sandbox)."""
-    if not BQ_PROJECT_ID:
-        logger.warning("[BQ Backup] BQ_PROJECT_ID trống -> skip BigQuery backup.")
-        return
-
-    t0 = time.time()
-    parquet_path = f"{BQ_PARQUET_DIR}/batch_{batch_id}"
-
-    # Cast decimal -> double để khớp BigQuery FLOAT64 schema
-    from pyspark.sql.types import DecimalType, DoubleType
-    for field in batch_df.schema.fields:
-        if isinstance(field.dataType, DecimalType):
-            batch_df = batch_df.withColumn(field.name, col(field.name).cast(DoubleType()))
-
-    # Ghi Parquet ra disk (nhiều part-file)
-    batch_df.coalesce(1).write.mode("overwrite").parquet(parquet_path)
-
-    # Dùng google-cloud-bigquery để load TẤT CẢ file lên BigQuery
-    try:
-        from google.cloud import bigquery
-        import glob
-
-        client   = bigquery.Client(project=BQ_PROJECT_ID)
-        table_id = f"{BQ_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE_FACT}"
-
-        # Lấy danh sách TẤT CẢ file Parquet vừa ghi
-        parquet_files = glob.glob(f"{parquet_path}/*.parquet")
-        if not parquet_files:
-            logger.warning(f"[BQ Backup] Batch {batch_id}: Không có file Parquet để load.")
-            return
-
-        logger.info(f"[BQ Backup] Batch {batch_id}: Đang load {len(parquet_files)} parquet file(s) lên BigQuery...")
-
-        job_config = bigquery.LoadJobConfig(
-            write_disposition="WRITE_APPEND",
-            source_format=bigquery.SourceFormat.PARQUET,
-            schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
-        )
-
-        # Load từng file một (vì Sandbox không hỗ trợ multi-file URI)
-        total_loaded = 0
-        for pf in parquet_files:
-            with open(pf, "rb") as f:
-                job = client.load_table_from_file(f, table_id, job_config=job_config)
-                job.result()  # chờ load xong
-                total_loaded += 1
-
-        elapsed = int((time.time() - t0) * 1000)
-        logger.info(
-            f"[Batch {batch_id}] -->  BigQuery backup | "
-            f"files={total_loaded} | rows={row_count:,} | latency={elapsed}ms"
-        )
-    except Exception as e:
-        logger.warning(f"[BQ Backup] Batch {batch_id}: Lỗi backup -> {e}")
-
-
-# ─── foreachBatch callback (Dual Sink) ───────────────────────────
 import threading
 
-# Buffer Queue cho BigQuery để giảm gánh nặng API (Tránh cạn kiệt 1,500 Load Jobs / Ngày)
 BQ_BUFFER = []
 BQ_BUFFER_LOCK = threading.Lock()
 LAST_BQ_UPLOAD_TIME = time.time()
@@ -368,20 +215,19 @@ def dual_sink_batch(batch_df: DataFrame, batch_id: int):
     global LAST_BQ_UPLOAD_TIME
     t_start = time.time()
     
-    # Gọi collect() 1 lần duy nhất để kích hoạt Pipeline (không cần count hay cache)
     rows = batch_df.collect()
     row_count = len(rows)
 
     if row_count == 0:
         return
 
-    # Sink 1: PostgreSQL (primary, real-time 100%)
+    # Sink 1: PostgreSQL 
     try:
         write_to_postgres(rows, batch_id, row_count)
     except Exception as e:
         logger.error(f"[Batch {batch_id}] [ERRO] PostgreSQL sink lỗi: {e}")
 
-    # Sink 2: BigQuery — Đẩy vào Buffer, gom lô thật lớn mới upload
+    # Sink 2: BigQuery Async 
     try:
         bq_data = [r.asDict() for r in rows]
         
@@ -390,7 +236,6 @@ def dual_sink_batch(batch_df: DataFrame, batch_id: int):
             current_buffer_size = len(BQ_BUFFER)
             time_since_last_upload = time.time() - LAST_BQ_UPLOAD_TIME
 
-        # Điều kiện xả Buffer (Flush) lên BigQuery
         if current_buffer_size >= BQ_UPLOAD_ROWS_LIMIT or time_since_last_upload >= BQ_UPLOAD_INTERVAL_SEC:
             with BQ_BUFFER_LOCK:
                 upload_data = BQ_BUFFER.copy()
@@ -398,7 +243,7 @@ def dual_sink_batch(batch_df: DataFrame, batch_id: int):
                 LAST_BQ_UPLOAD_TIME = time.time()
                 
             if len(upload_data) > 0:
-                logger.info(f"[BQ Buffer Flush] Gom được {len(upload_data):,} dòng trong {int(time_since_last_upload)} giây. Bắt đầu upload...")
+                logger.info(f"[BQ Buffer Flush] Gom được {len(upload_data):,} dòng trong {int(time_since_last_upload)} sec. Uploading...")
                 threading.Thread(
                     target=_bq_async_upload,
                     args=(upload_data, batch_id, len(upload_data)),
@@ -412,7 +257,6 @@ def dual_sink_batch(batch_df: DataFrame, batch_id: int):
 
 
 def _bq_async_upload(rows_dicts, batch_id, row_count):
-    """Background: pandas → Parquet → BigQuery Load Job (Sandbox compatible)."""
     if not BQ_PROJECT_ID:
         return
     try:
@@ -422,14 +266,12 @@ def _bq_async_upload(rows_dicts, batch_id, row_count):
 
         pdf = _pd.DataFrame(rows_dicts)
         
-        # Ép kiểu Decimal (từ Spark) ->  Float64 để khớp với BigQuery schema (FLOAT64)
-        float_cols = ["amount", "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest"]
+        # Float matching BQ Schema
+        float_cols = ["price", "quantity", "amount_usd"]
         for c in float_cols:
             if c in pdf.columns:
                 pdf[c] = pdf[c].astype(float)
                 
-        # Xóa đoạn ép sang str, giữ nguyên datetime nhưng ép Parquet lưu dạng microseconds
-        # Thay vì nanoseconds mặc định của pyarrow (BigQuery không đọc được)
         os.makedirs(BQ_PARQUET_DIR, exist_ok=True)
         pq_path = os.path.join(BQ_PARQUET_DIR, f"batch_{batch_id}.parquet")
         
@@ -468,13 +310,9 @@ def main():
         sys.stderr.reconfigure(encoding='utf-8')
         
     print("=" * 65)
-    print("--> PaySim Dual-Sink Streaming (PostgreSQL + BigQuery backup)")
-    print(f"--> Kafka  : {KAFKA_BOOTSTRAP_SERVERS}  |  Topic: {KAFKA_TOPIC}")
-    print(f"--> PG     : {PG_HOST}:{PG_PORT}/{PG_DB}")
-    if BQ_PROJECT_ID:
-        print(f"--> BQ     : {BQ_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE_FACT}  (backup)")
-    else:
-        print("--> BigQuery chưa cấu hình -> chỉ ghi PostgreSQL")
+    print("--> Binance Crypto Streaming (PG + BQ Backup)")
+    print(f"--> Khử duplicate tự nhiên thông qua Idempotent UUID")
+    print(f"--> Phân hạng Volume & Phát hiện Anomaly nguyên bản")
     print("=" * 65)
 
     spark = create_spark_session()
@@ -496,23 +334,23 @@ def main():
     parsed_df = (
         kafka_df
         .selectExpr("CAST(value AS STRING) as json_string")
-        .select(from_json(col("json_string"), payment_schema).alias("data"))
+        .select(from_json(col("json_string"), binance_schema).alias("data"))
         .select("data.*")
     )
 
-    # 3. Transform & Stream-Static Join
+    # 3. Transform & Duplicate Control
     fact_df = build_fact_df(spark, parsed_df)
 
-    # 4. Dual Sink via foreachBatch — Trigger mỗi 200ms cho near real-time
+    # 4. Sink Output
     TRIGGER_INTERVAL = os.getenv("SPARK_TRIGGER_INTERVAL", "200 milliseconds")
-    logger.info(f"[CONFIG] Trigger: {TRIGGER_INTERVAL} | maxOffsets: 500 | BQ: async every batch")
+    logger.info(f"[CONFIG] Trigger: {TRIGGER_INTERVAL} | maxOffsets: 500")
 
     query = (
         fact_df.writeStream
         .outputMode("append")
         .foreachBatch(dual_sink_batch)
         .trigger(processingTime=TRIGGER_INTERVAL)
-        .option("checkpointLocation", "/tmp/spark_checkpoint_dual_sink_v3")
+        .option("checkpointLocation", "/tmp/spark_checkpoint_binance_v4") # Đổi tên checkpoint directory 
         .start()
     )
 

@@ -1,9 +1,9 @@
 """
-warehouse/postgres_schema.py - Tạo Star Schema trên PostgreSQL
+warehouse/postgres_schema.py - Khởi tạo Native Crypto Pipeline Schema & Star Schema
 ==============================================================
-Chạy script này để khởi tạo toàn bộ bảng Star Schema trong PostgreSQL:
-  - 1 Fact table : fact_transactions
-  - 5 Dim tables : dim_users, dim_merchants, dim_transaction_type, dim_location, dim_date
+Chạy script này để khởi tạo bảng Data Warehouse mới:
+  - 1 Fact table: fact_binance_trades
+  - 5 Dim tables: dim_date, dim_time, dim_volume_category, dim_crypto_pair, dim_exchange_rate
 
 Yêu cầu:
   - PostgreSQL đang chạy (docker-compose up -d postgres)
@@ -26,26 +26,24 @@ PG_PASSWORD = os.getenv("POSTGRES_PASSWORD", "paysim123")
 DATABASE_URL = f"postgresql+psycopg2://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 
 
+# Lệnh dọn dẹp các Schema cũ (do đập đi xây lại)
+DROP_LEGACY_STATEMENTS = [
+    "DROP TABLE IF EXISTS fact_binance_trades CASCADE;",
+    "DROP TABLE IF EXISTS fact_transactions CASCADE;",
+    "DROP TABLE IF EXISTS dim_users CASCADE;",
+    "DROP TABLE IF EXISTS dim_account CASCADE;",
+    "DROP TABLE IF EXISTS dim_merchants CASCADE;",
+    "DROP TABLE IF EXISTS dim_transaction_type CASCADE;",
+    "DROP TABLE IF EXISTS dim_location CASCADE;",
+    "DROP TABLE IF EXISTS dim_channel CASCADE;",
+    "DROP TABLE IF EXISTS dim_time CASCADE;",
+    "DROP TABLE IF EXISTS dim_date CASCADE;",
+    "DROP TABLE IF EXISTS dim_volume_category CASCADE;",
+    "DROP TABLE IF EXISTS dim_crypto_pair CASCADE;",
+    "DROP TABLE IF EXISTS dim_exchange_rate CASCADE;"
+]
+
 DDL_STATEMENTS = [
-    # ── dim_transaction_type ──────────────────────────────────────
-    """
-    CREATE TABLE IF NOT EXISTS dim_transaction_type (
-        type_id             VARCHAR(20) PRIMARY KEY,
-        type_name           VARCHAR(50),
-        is_reward_eligible  BOOLEAN,
-        reward_multiplier   FLOAT
-    );
-    """,
-
-    # ── dim_location ─────────────────────────────────────────────
-    """
-    CREATE TABLE IF NOT EXISTS dim_location (
-        location_id VARCHAR(20) PRIMARY KEY,
-        city        VARCHAR(100),
-        region      VARCHAR(50)
-    );
-    """,
-
     # ── dim_date ─────────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS dim_date (
@@ -70,90 +68,69 @@ DDL_STATEMENTS = [
     );
     """,
 
-    # ── dim_channel ──────────────────────────────────────────────
+    # ── dim_volume_category ──────────────────────────────────────
     """
-    CREATE TABLE IF NOT EXISTS dim_channel (
-        channel_id   VARCHAR(20) PRIMARY KEY,
-        channel_name VARCHAR(50),
-        device_os    VARCHAR(50)
+    CREATE TABLE IF NOT EXISTS dim_volume_category (
+        volume_category VARCHAR(50) PRIMARY KEY,
+        description     VARCHAR(255),
+        min_usd         NUMERIC(20, 2),
+        max_usd         NUMERIC(20, 2)
     );
     """,
 
-    # ── dim_users ────────────────────────────────────────────────
+    # ── dim_crypto_pair ──────────────────────────────────────────
     """
-    CREATE TABLE IF NOT EXISTS dim_users (
-        user_id           VARCHAR(50) PRIMARY KEY,
-        account_balance   NUMERIC(20, 2),
-        user_segment      VARCHAR(20),
-        registration_date DATE
+    CREATE TABLE IF NOT EXISTS dim_crypto_pair (
+        crypto_symbol VARCHAR(20) PRIMARY KEY,
+        base_asset    VARCHAR(20),
+        quote_asset   VARCHAR(20),
+        pair_name     VARCHAR(100)
     );
     """,
 
-    # ── dim_account ──────────────────────────────────────────────
+    # ── dim_exchange_rate ────────────────────────────────────────
     """
-    CREATE TABLE IF NOT EXISTS dim_account (
-        account_id     VARCHAR(50) PRIMARY KEY,
-        user_id        VARCHAR(50),
-        account_type   VARCHAR(50),
-        account_status VARCHAR(20),
-        created_date   DATE,
-        CONSTRAINT fk_account_user FOREIGN KEY (user_id) REFERENCES dim_users(user_id)
+    CREATE TABLE IF NOT EXISTS dim_exchange_rate (
+        date_key        BIGINT PRIMARY KEY,
+        currency_code   VARCHAR(10),
+        vnd_rate        NUMERIC(15, 2),
+        CONSTRAINT fk_fx_date FOREIGN KEY (date_key) REFERENCES dim_date(date_key)
     );
     """,
 
-    # ── dim_merchants ────────────────────────────────────────────
+    # ── fact_binance_trades ────────────────────────────────────────
     """
-    CREATE TABLE IF NOT EXISTS dim_merchants (
-        merchant_id       VARCHAR(50) PRIMARY KEY,
-        merchant_name     VARCHAR(100),
-        merchant_category VARCHAR(50)
-    );
-    """,
-
-    # ── fact_transactions ────────────────────────────────────────
-    """
-    CREATE TABLE IF NOT EXISTS fact_transactions (
+    CREATE TABLE IF NOT EXISTS fact_binance_trades (
         transaction_id   VARCHAR(50) PRIMARY KEY,
-        account_id       VARCHAR(50),
-        merchant_id      VARCHAR(50),
-        type_id          VARCHAR(20),
-        location_id      VARCHAR(20),
-        channel_id       VARCHAR(20),
+        trade_id         BIGINT,
+        crypto_symbol    VARCHAR(20),
         date_key         BIGINT,
         time_key         BIGINT,
-        transaction_time TIMESTAMP,
-        amount           NUMERIC(20, 2),
-        reward_points    BIGINT,
-        type             VARCHAR(20),
-        step             INTEGER,
-        "oldbalanceOrg"  NUMERIC(20, 2),
-        "newbalanceOrig" NUMERIC(20, 2),
-        "oldbalanceDest" NUMERIC(20, 2),
-        "newbalanceDest" NUMERIC(20, 2),
-        "isFraud"        INTEGER,
-        "isFlaggedFraud" INTEGER,
-        ip_address       VARCHAR(50),
-        CONSTRAINT fk_account FOREIGN KEY (account_id) REFERENCES dim_account(account_id),
-        CONSTRAINT fk_merchant FOREIGN KEY (merchant_id) REFERENCES dim_merchants(merchant_id),
-        CONSTRAINT fk_type FOREIGN KEY (type_id) REFERENCES dim_transaction_type(type_id),
-        CONSTRAINT fk_location FOREIGN KEY (location_id) REFERENCES dim_location(location_id),
-        CONSTRAINT fk_channel FOREIGN KEY (channel_id) REFERENCES dim_channel(channel_id),
-        CONSTRAINT fk_date FOREIGN KEY (date_key) REFERENCES dim_date(date_key),
-        CONSTRAINT fk_time FOREIGN KEY (time_key) REFERENCES dim_time(time_key)
+        trade_time       TIMESTAMP,
+        price            NUMERIC(38, 9),
+        quantity         NUMERIC(38, 9),
+        amount_usd       NUMERIC(38, 9),
+        is_buyer_maker   BOOLEAN,
+        volume_category  VARCHAR(50),
+        is_anomaly       BOOLEAN,
+        buyer_order_id   BIGINT,
+        seller_order_id  BIGINT,
+        CONSTRAINT fk_trade_date FOREIGN KEY (date_key) REFERENCES dim_date(date_key),
+        CONSTRAINT fk_trade_time FOREIGN KEY (time_key) REFERENCES dim_time(time_key),
+        CONSTRAINT fk_trade_category FOREIGN KEY (volume_category) REFERENCES dim_volume_category(volume_category),
+        CONSTRAINT fk_trade_symbol FOREIGN KEY (crypto_symbol) REFERENCES dim_crypto_pair(crypto_symbol)
     );
     """,
 
     # ── Indexes ──────────────────────────────────────────────────
-    "CREATE INDEX IF NOT EXISTS idx_fact_account ON fact_transactions(account_id);",
-    "CREATE INDEX IF NOT EXISTS idx_fact_merchant ON fact_transactions(merchant_id);",
-    "CREATE INDEX IF NOT EXISTS idx_fact_time ON fact_transactions(transaction_time);",
-    "CREATE INDEX IF NOT EXISTS idx_fact_date ON fact_transactions(date_key);",
+    "CREATE INDEX IF NOT EXISTS idx_binance_symbol ON fact_binance_trades(crypto_symbol);",
+    "CREATE INDEX IF NOT EXISTS idx_binance_time ON fact_binance_trades(trade_time);",
+    "CREATE INDEX IF NOT EXISTS idx_binance_amount ON fact_binance_trades(amount_usd);",
 ]
-
 
 def main():
     print("=" * 60)
-    print("  PostgreSQL Star Schema - Khởi tạo Data Warehouse")
+    print("  PostgreSQL Schema - Native Crypto Pipeline with Star Schema")
     print("=" * 60)
     print(f"  Host : {PG_HOST}:{PG_PORT}")
     print(f"  DB   : {PG_DB}")
@@ -162,12 +139,15 @@ def main():
     engine = sa.create_engine(DATABASE_URL)
 
     with engine.begin() as conn:
+        print("Xoá các bảng cũ (Legacy Mode)...")
+        for stmt in DROP_LEGACY_STATEMENTS:
+            conn.execute(text(stmt))
+            
+        print("Đang tạo bảng DB mới (1 Fact, 5 Dims)...")
         for stmt in DDL_STATEMENTS:
             conn.execute(text(stmt))
 
-    print("[DONE] HOÀN TẤT! Star Schema đã tạo trong PostgreSQL:")
-    print("   fact_transactions, dim_users, dim_account, dim_merchants,")
-    print("   dim_transaction_type, dim_location, dim_date, dim_time, dim_channel")
+    print("[DONE] HOÀN TẤT! Data Warehouse đã sẵn sàng thiết lập Power BI.")
     print("=" * 60)
 
 

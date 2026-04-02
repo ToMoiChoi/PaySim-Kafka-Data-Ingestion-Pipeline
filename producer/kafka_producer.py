@@ -67,7 +67,10 @@ def load_and_transform(csv_path: str) -> pd.DataFrame:
     # 3. ip_address: Sinh IP ngẫu nhiên
     df["ip_address"] = [f"{random.randint(1,255)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,255)}" for _ in range(len(df))]
 
-    print(f"      Đã thêm mock data: transaction_id, event_timestamp, account_id, channel_id, ip_address")
+    # 4. crypto_symbol: FIAT cho giao dịch truyền thống
+    df["crypto_symbol"] = "FIAT"
+
+    print(f"      Đã thêm mock data: transaction_id, event_timestamp, account_id, channel_id, ip_address, crypto_symbol")
     return df
 
 

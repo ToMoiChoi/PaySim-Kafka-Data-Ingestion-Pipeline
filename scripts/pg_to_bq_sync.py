@@ -30,16 +30,13 @@ if not BQ_PROJECT_ID:
     sys.exit(1)
 
 TABLES_TO_SYNC = [
-    "dim_users",
-    "dim_merchants", 
-    "dim_transaction_type",
-    "dim_location",
+    "dim_volume_category",
+    "dim_crypto_pair",
+    "dim_exchange_rate",
     "dim_date",
     "dim_time",
-    "dim_channel",
-    "dim_account",
-    # "fact_transactions"
-]
+    "fact_binance_trades"
+]                                                                                     
 
 def sync_table(table_name, db_url):
     print(f"\n🔄 Đang lấy dữ liệu bảng '{table_name}' từ PostgreSQL...")
@@ -49,16 +46,14 @@ def sync_table(table_name, db_url):
         print(f"⚠️ Bảng '{table_name}' không có dữ liệu!")
         return
 
-    # Fix kiểu dữ liệu cho fact_transactions
-    if table_name == "fact_transactions":
+    # Fix kiểu dữ liệu cho fact_binance_trades
+    if table_name == "fact_binance_trades":
         try:
             # Convert Decimal → float → khớp BigQuery FLOAT64
-            df['amount'] = df['amount'].astype(float)
-            df['oldbalanceOrg'] = df['oldbalanceOrg'].astype(float)
-            df['newbalanceOrig'] = df['newbalanceOrig'].astype(float)
-            df['oldbalanceDest'] = df['oldbalanceDest'].astype(float)
-            df['newbalanceDest'] = df['newbalanceDest'].astype(float)
-            df['transaction_time'] = pd.to_datetime(df['transaction_time'], utc=True)
+            df['price'] = df['price'].astype(float)
+            df['quantity'] = df['quantity'].astype(float)
+            df['amount_usd'] = df['amount_usd'].astype(float)
+            df['trade_time'] = pd.to_datetime(df['trade_time'], utc=True)
         except Exception:
             pass
             
@@ -72,21 +67,13 @@ def sync_table(table_name, db_url):
     
     try:
         from google.cloud import bigquery
-        from warehouse.bigquery_schema import TABLES as BQ_SCHEMAS
 
         client = bigquery.Client(project=BQ_PROJECT_ID)
         table_id = f"{BQ_PROJECT_ID}.{BQ_DATASET}.{table_name}"
 
-        # Lấy schema cứng từ bigquery_schema.py (nếu có) để ép kiểu chính xác
-        # Tránh để Pandas tự suy luận sai kiểu (FLOAT vs NUMERIC, DATETIME vs TIMESTAMP)
-        schema = BQ_SCHEMAS.get(table_name)
-
         job_config = bigquery.LoadJobConfig(
             write_disposition="WRITE_TRUNCATE",
         )
-
-        if schema:
-            job_config.schema = schema
 
         job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
         job.result()  

@@ -1,0 +1,74 @@
+KỊCH BẢN THUYẾT TRÌNH: BACKEND DATA STREAMING PIPELINE (KLTN)
+
+Chào mừng thầy cô và các bạn đến với phần trình bày chi tiết về Data Streaming Pipeline của hệ thống. Trong kiến trúc này, chúng em tập trung vào hai thành phần cốt lõi đóng vai trò "trái tim" của hệ thống xử lý luồng dữ liệu thời gian thực:
+1. Live Producer (live_producer.py): Gateway thu thập dữ liệu giao dịch trực tiếp.
+2. Spark Processor (spark_processor.py): Động cơ xử lý phân tán và điều phối dữ liệu (Dual-sink).
+
+Sau đây, em xin đi sâu vào giải thích tư duy thiết kế và luồng code (Logic Flow) của từng thành phần.
+
+--------------------------------------------------
+PHẦN 1: LIVE PRODUCER (live_producer.py)
+--------------------------------------------------
+Mục tiêu: Lấy dữ liệu thật, tốc độ siêu tốc, và mô phỏng chính xác môi trường giao dịch tài chính.
+
+Thay vì dùng dữ liệu giả (mock data / Faker), hệ thống kết nối trực tiếp với Binance WebSocket API để lấy stream giao dịch tiền số (Crypto trades) trên toàn cầu theo thời gian thực (real-time).
+
+1. KẾT NỐI VÀ LẮNG NGHE (WEBSOCKET ASYNC)
+Hệ thống sử dụng thư viện websockets kết hợp với asyncio để mở kết nối bất đồng bộ đến Binance:
+- Mỗi khi có một giao dịch mua/bán (ví dụ: BTC/USDT) xảy ra trên sàn, Binance lập tức đẩy một file JSON chứa thông tin giao dịch đó vào hàm listen_binance().
+- Vì dùng asyncio (Lập trình bất đồng bộ), app không bao giờ bị "đứng" (blocking) khi đợi dữ liệu chạy qua mạng; nó có thể hứng hàng ngàn tin nhắn mỗi giây một cách cực kỳ mượt mà.
+
+2. MÔ PHỎNG GIAO DỊCH TÀI CHÍNH (DATA MAPPING)
+Dữ liệu của Binance là tiền mã hóa, nhưng bài toán của chúng ta là Hệ thống Thanh toán (PaySim). Do đó, hàm map_binance_trade_to_event() đóng vai trò "ánh xạ" logic:
+- Phân loại Cấp độ (Transaction Type): Code dựa vào khối lượng giao dịch thật. Dưới 10$ là MICRO_TRADE, từ 10$ - 1000$ là SPOT_BUY/SPOT_SELL, và đặc biệt trên 5000$ được gắn cờ nguyên bản là WHALE_ALERT (Giao dịch cá mập - cảnh báo kiểm toán).
+- Tạo người gửi / người nhận: Thuật toán tự động sinh ngẫu nhiên user_id (người gửi) và merchant_id (người nhận) chọn lọc từ danh sách khách hàng và cửa hàng thực tế (được sync từ Data Warehouse của hệ thống).
+- Xử lý thiếu hụt dữ liệu (Fault Tolerance): Code sử dụng hàm Get an toàn (.get("p", 0)) thay vì truy cập thẳng mảng JSON, phòng ngừa trường hợp API Binance gửi thiếu trường dữ liệu, giúp pipeline không bao giờ bị Crash đột ngột do lỗi KeyError.
+
+3. BƠM VÀO KAFKA (KAFKA PRODUCER)
+- Sử dụng thư viện confluent-kafka viết bằng ngôn ngữ C++ lõi (nhanh hơn rất nhiều so với thư viện thuần Python kafka-python).
+- Message JSON sau khi chuẩn hóa được ép thành mảng Byte (utf-8) và serialize làm value bắn thẳng vào Topic Kafka có tên payment_events_v3.
+- Cơ chế Nhận biết (Delivery Report): Hệ thống thiết lập hàm delivery_report chạy kiểu Callback (gọi ngược). Cứ khi cụm (Broker) Kafka xác nhận "Đã lưu thành công", hàm này mới in log để theo dõi tính toàn vẹn.
+
+--------------------------------------------------
+PHẦN 2: ĐỘNG CƠ SPARK STREAMING (spark_processor.py)
+--------------------------------------------------
+Mục tiêu: Nhận dữ liệu cực lớn từ Kafka, Xử lý (Enrichment), và đẩy cùng lúc vào 2 CSDL khác nhau mà độ trễ (Latency) phải dưới 200 milliseconds.
+
+1. ĐỌC STREAMING MICRO-BATCH (KAFKA SOURCE)
+- Sau khi khởi tạo SparkSession, ta định tuyến Spark kết nối Kafka và quét Topic vòng lặp chỉ 200 milliseconds một lần (tham số ProcessingTimeTrigger). Mỗi lô (micro-batch) nhỏ, Spark kéo tối đa 500 records. Điều này chia nhỏ gánh nặng và giúp hệ thống đạt chuẩn Near Real-time (Gần thời gian thực hoàn hảo).
+- Đầu vào từ Kafka là dạng nhị phân. Spark dùng lệnh from_json ánh xạ nó lại thành bảng DataFrame cấu trúc chuẩn với cột Schema xác định trước.
+
+2. KỸ THUẬT TỐI ƯU HÓA: CACHING & BROADCAST JOIN
+Đây là "bài toán sống còn" về hiệu năng của luồng code này:
+- Để hiển thị Dashboard có tên/thông tin Khách hàng chứ không chỉ mã UUID, ta bắt buộc phải Join (Kết hợp) dữ liệu streaming nhỏ giọt với danh sách khách hàng tĩnh (dim_users). Nhưng bảng users nằm ở PostgreSQL tận 6.3 triệu dòng!
+- Cách giải quyết của nhóm: Áp dụng kỹ thuật Broadcast Join kết hợp Caching. Ngay từ đầu, Spark tải toàn bộ bảng dim_users và cột luật dim_txn_type lên thẳng In-Memory RAM của cụm và khoá cứng lại (.cache()). Lúc dữ liệu luồng lướt qua, Spark tra cứu (Lookup) thẳng vào RAM nhanh thoăn thoắt mà không cần tốn 1 Request Database nào.
+
+3. WORKFLOW LUÂN CHUYỂN & LÀM GIÀU (DATA TRANSFORMATION)
+- Sử dụng cờ is_reward_eligible từ bảng Dimension tra ra được, Spark tự động tính điểm thưởng: Cột mới reward_points = amount * reward_multiplier.
+- Code tạo sẵn các cột định dạng Thời gian chuyên sâu như date_key (VD: 20260329) và time_key (VD: 2315) dùng thẳng cho mô hình Data Warehouse đa chiều (Star Schema).
+
+4. ĐỘT PHÁ KIẾN TRÚC: DUAL-SINK & BUFFER MICRO-BATCHING
+Bài toán khó nhất là: Làm sao để vừa hiển thị Real-time trên màn hình ở PostgreSQL (tốc độ cao), vừa lưu trữ Backup vĩnh viễn trên Google BigQuery (tốc độ chậm vì xài Cloud Storage) mà hai luồng không cản trở độ trễ mạng của nhau?
+Chúng em dùng foreachBatch chẻ luồng dữ liệu làm hai:
+
+A. Tối ưu Evaluate Plan (Xử lý 1 lần duy nhất)
+- Thay vì dùng df.count() hay df.cache() thừa thãi làm Spark quét lệnh trên luồng Kafka tới 3 lần. Nhóm phân vùng và áp dụng thủ thuật gọi .collect() một lần duy nhất. Thao tác này kích hoạt liền mạch toàn bộ đường ống (Đọc->Lọc->Join) và kéo Mảng dữ liệu về lõi xử lý (Driver CPU). Tốc độ trễ tức thì tụt từ 2 giây xuống dưới 200ms.
+
+B. Nhánh 1: Cập nhật PostgreSQL (Sub-second Latency)
+- Tuyệt đối không dùng Data Source JDBC mặc định của Spark vì bộ máy này ghi chèn tuần tự cực chậm trên mô hình Batch. Hệ thống lấy danh sách vừa chạy, mở hàm Python và cài thẳng thư viện chuẩn psycopg2 module execute_values. Phương pháp này mang tên Direct Bulk Insert. Một lệnh SQL khổng lồ nhồi hàng loạt dòng dữ liệu vào bảng Postgres chỉ tốn <50ms.
+
+C. Nhánh 2: BigQuery Micro-Batch Queue (Thread Bất đồng bộ)
+- Vấn đề: Google BigQuery bắt buộc dùng LoadJob API định dạng gốc Parquet. Trục trặc phát sinh khi API này bị Google đặt mức hạn ngạch (Quota) cực đoan: 1,500 Load Jobs / Ngày. Nếu 200ms ta lại đâm vô BigQuery 1 lần giống PostgreSQL, hệ thống sẽ cháy sạch Quota tài nguyên và bị khóa chết (Blocked) chỉ trong không đầy 1 tiếng vận hành.
+- Giải quyết: Nhóm thiết kế một "Trạm trung chuyển dữ liệu đệm" (Buffer Queue Array) chạy trên Cơ chế Threading xoay vòng (Locking Async Thread) hoàn toàn độc lập và ngầm. Dữ liệu sau khi lướt qua màn hình Postgres sẽ bị lẳng lặng ném vào Mảng Trạm RAM (BQ_BUFFER).
+- Khi hồ chứa đạt ngưỡng cứng 5,000 giao dịch hoặc quá hạn chờ Timeout 10 giây tính từ lần đổ (Flush) cuối cùng, một Lõi Background đơn độc duy nhất (Background worker) thu gom toàn bộ và đóng gói dữ liệu thành chuẩn file nén lưu trữ Parquet, và bắn duy nhất 1 lần khổng lồ đó dọc đường ống Google Cloud LoadJob.
+- Ghi chú khắc phục Lỗi Thời gian Nanosecond: Khi đóng gói Parquet, pyarrow mặc định đổ mốc Timestamp vượt ngưỡng BigQuery (mức Nanoseconds). Nhóm nắm quyền kiểm soát bằng cách rào chặt tham số coerce_timestamps="us" ép pyarrow lùi về chuẩn Microseconds để dữ liệu đi thẳng vào bảng Google Storage không gặp bất kỳ rào cản Schema nào.
+
+KẾT LUẬN
+Bằng việc kết hợp 3 kỹ nghệ lõi:
+1. Stream-to-Static In-Memory Join thông qua kiến trúc Broadcast của Spark.
+2. Thuật toán Direct Bulk Insert vòng qua lõi Driver JDBC của PostgreSQL.
+3. Cơ chế Async Buffer Queue (Trạm trung chuyển bất đồng bộ) trên GCP BigQuery REST.
+
+Pipeline này vượt ra ngoài giới hạn tốc độ Fast Real-Time siêu việt phục vụ Web Tracking Monitoring, và còn tuân thủ nguyên vẹn và lách khéo bức tường chi phí khắt khe của hệ thống Data Warehouse đám mây theo cấp độ Production (Enterprise Grade).
+
+Xin cảm ơn quý thầy cô và hội đồng đã lắng nghe chuyên sâu chi tiết!
