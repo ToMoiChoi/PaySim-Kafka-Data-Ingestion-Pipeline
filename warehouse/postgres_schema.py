@@ -1,13 +1,13 @@
 """
-warehouse/postgres_schema.py - Khởi tạo Native Crypto Pipeline Schema & Star Schema
+warehouse/postgres_schema.py - Create Native Crypto Pipeline Schema & Star Schema
 ==============================================================
-Chạy script này để khởi tạo bảng Data Warehouse mới:
+Run this script to set up the Data Warehouse tables:
   - 1 Fact table: fact_binance_trades
   - 5 Dim tables: dim_date, dim_time, dim_volume_category, dim_crypto_pair, dim_exchange_rate
 
-Yêu cầu:
-  - PostgreSQL đang chạy (docker-compose up -d postgres)
-  - Biến POSTGRES_* trong .env
+Requirements:
+  - PostgreSQL must be running (docker-compose up -d postgres)
+  - POSTGRES_* variables set in .env
 """
 
 import os
@@ -26,25 +26,8 @@ PG_PASSWORD = os.getenv("POSTGRES_PASSWORD", "paysim123")
 DATABASE_URL = f"postgresql+psycopg2://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 
 
-# Lệnh dọn dẹp các Schema cũ (do đập đi xây lại)
-DROP_LEGACY_STATEMENTS = [
-    "DROP TABLE IF EXISTS fact_binance_trades CASCADE;",
-    "DROP TABLE IF EXISTS fact_transactions CASCADE;",
-    "DROP TABLE IF EXISTS dim_users CASCADE;",
-    "DROP TABLE IF EXISTS dim_account CASCADE;",
-    "DROP TABLE IF EXISTS dim_merchants CASCADE;",
-    "DROP TABLE IF EXISTS dim_transaction_type CASCADE;",
-    "DROP TABLE IF EXISTS dim_location CASCADE;",
-    "DROP TABLE IF EXISTS dim_channel CASCADE;",
-    "DROP TABLE IF EXISTS dim_time CASCADE;",
-    "DROP TABLE IF EXISTS dim_date CASCADE;",
-    "DROP TABLE IF EXISTS dim_volume_category CASCADE;",
-    "DROP TABLE IF EXISTS dim_crypto_pair CASCADE;",
-    "DROP TABLE IF EXISTS dim_exchange_rate CASCADE;"
-]
-
 DDL_STATEMENTS = [
-    # ── dim_date ─────────────────────────────────────────────────
+    # -- dim_date ---------------------------------------------------------
     """
     CREATE TABLE IF NOT EXISTS dim_date (
         date_key    BIGINT PRIMARY KEY,
@@ -57,7 +40,7 @@ DDL_STATEMENTS = [
     );
     """,
 
-    # ── dim_time ─────────────────────────────────────────────────
+    # -- dim_time ---------------------------------------------------------
     """
     CREATE TABLE IF NOT EXISTS dim_time (
         time_key         BIGINT PRIMARY KEY,
@@ -68,7 +51,7 @@ DDL_STATEMENTS = [
     );
     """,
 
-    # ── dim_volume_category ──────────────────────────────────────
+    # -- dim_volume_category ----------------------------------------------
     """
     CREATE TABLE IF NOT EXISTS dim_volume_category (
         volume_category VARCHAR(50) PRIMARY KEY,
@@ -78,7 +61,7 @@ DDL_STATEMENTS = [
     );
     """,
 
-    # ── dim_crypto_pair ──────────────────────────────────────────
+    # -- dim_crypto_pair --------------------------------------------------
     """
     CREATE TABLE IF NOT EXISTS dim_crypto_pair (
         crypto_symbol VARCHAR(20) PRIMARY KEY,
@@ -88,7 +71,7 @@ DDL_STATEMENTS = [
     );
     """,
 
-    # ── dim_exchange_rate ────────────────────────────────────────
+    # -- dim_exchange_rate ------------------------------------------------
     """
     CREATE TABLE IF NOT EXISTS dim_exchange_rate (
         date_key        BIGINT PRIMARY KEY,
@@ -98,7 +81,7 @@ DDL_STATEMENTS = [
     );
     """,
 
-    # ── fact_binance_trades ────────────────────────────────────────
+    # -- fact_binance_trades ----------------------------------------------
     """
     CREATE TABLE IF NOT EXISTS fact_binance_trades (
         transaction_id   VARCHAR(50) PRIMARY KEY,
@@ -122,7 +105,7 @@ DDL_STATEMENTS = [
     );
     """,
 
-    # ── Indexes ──────────────────────────────────────────────────
+    # -- Indexes ----------------------------------------------------------
     "CREATE INDEX IF NOT EXISTS idx_binance_symbol ON fact_binance_trades(crypto_symbol);",
     "CREATE INDEX IF NOT EXISTS idx_binance_time ON fact_binance_trades(trade_time);",
     "CREATE INDEX IF NOT EXISTS idx_binance_amount ON fact_binance_trades(amount_usd);",
@@ -139,15 +122,15 @@ def main():
     engine = sa.create_engine(DATABASE_URL)
 
     with engine.begin() as conn:
-        print("Xoá các bảng cũ (Legacy Mode)...")
+        print("Dropping legacy tables...")
         for stmt in DROP_LEGACY_STATEMENTS:
             conn.execute(text(stmt))
             
-        print("Đang tạo bảng DB mới (1 Fact, 5 Dims)...")
+        print("Creating new tables (1 Fact, 5 Dims)...")
         for stmt in DDL_STATEMENTS:
             conn.execute(text(stmt))
 
-    print("[DONE] HOÀN TẤT! Data Warehouse đã sẵn sàng thiết lập Power BI.")
+    print("[DONE] Data Warehouse is ready for Power BI.")
     print("=" * 60)
 
 

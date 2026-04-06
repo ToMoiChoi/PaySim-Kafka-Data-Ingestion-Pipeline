@@ -1,13 +1,13 @@
 """
-warehouse/seed_dimensions_pg.py - Tự động bơm dữ liệu cho Star Schema Mới
+warehouse/seed_dimensions_pg.py - Seed dimension data for the new Star Schema
 ====================================================================================
-Chạy SAU khi đã chạy `postgres_schema.py` để tạo bảng.
+Run AFTER `postgres_schema.py` has been executed to create the tables.
 
-Mục tiêu thiết lập:
- - dim_date & dim_time: Tự sinh 100% bằng logic Python.
- - dim_volume_category: Khởi tạo các Hạng Khối lượng (Định mức Chainalysis).
- - dim_crypto_pair: Định nghĩa các cặp giao dịch hiện hành.
- - dim_exchange_rate: Sinh tỷ giá USD/VND theo từng ngày (Random Walk).
+This script populates:
+ - dim_date & dim_time: Generated entirely by Python logic.
+ - dim_volume_category: Initialises volume tiers (based on Chainalysis thresholds).
+ - dim_crypto_pair: Defines the currently tracked trading pairs.
+ - dim_exchange_rate: Generates daily USD/VND exchange rates (Random Walk simulation).
 """
 
 import os
@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 import sqlalchemy as sa
 import psycopg2.extras
 
-# ─── 1. Load config ───
+# --- 1. Load config ---
 load_dotenv()
 
 PG_HOST     = os.getenv("POSTGRES_HOST", "localhost")
@@ -31,12 +31,12 @@ PG_PASSWORD = os.getenv("POSTGRES_PASSWORD", "paysim123")
 DATABASE_URL = f"postgresql+psycopg2://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 
 
-# ─── 2. Dữ Liệu Tĩnh ───
+# --- 2. Static Data ---
 VOLUME_CATEGORIES = [
-    {"volume_category": "RETAIL",        "description": "Giao dịch nhỏ lẻ dưới 10,000 USD",          "min_usd": 0,         "max_usd": 9999.99},
-    {"volume_category": "PROFESSIONAL",  "description": "Giao dịch cá nhân chuyên nghiệp 10k-100k",  "min_usd": 10000,     "max_usd": 99999.99},
-    {"volume_category": "INSTITUTIONAL", "description": "Giao dịch khối lớn/Tổ chức 100k-1Tr",       "min_usd": 100000,    "max_usd": 999999.99},
-    {"volume_category": "WHALE",         "description": "Cá Mập/Cá Voi - Bất thường trên 1 Triệu",   "min_usd": 1000000,   "max_usd": 99999999999.99},
+    {"volume_category": "RETAIL",        "description": "Small trades under 10,000 USD",                    "min_usd": 0,         "max_usd": 9999.99},
+    {"volume_category": "PROFESSIONAL",  "description": "Professional individual trades 10k-100k",          "min_usd": 10000,     "max_usd": 99999.99},
+    {"volume_category": "INSTITUTIONAL", "description": "Large block / institutional trades 100k-1M",       "min_usd": 100000,    "max_usd": 999999.99},
+    {"volume_category": "WHALE",         "description": "Whale trades - anomalous orders above 1 Million",  "min_usd": 1000000,   "max_usd": 99999999999.99},
 ]
 
 CRYPTO_PAIRS = [
@@ -48,10 +48,10 @@ CRYPTO_PAIRS = [
 ]
 
 
-# ─── 3. Hàm Bơm Dữ Liệu ───
+# --- 3. Insert Helper ---
 def seed_table(engine, table_name: str, df: pd.DataFrame) -> int:
-    """Insert DataFrame vào PostgreSQL table bằng psycopg2 (TRUNCATE trước nếu cần)."""
-    print(f"    [SEND] Nạp {len(df):,} rows -> {table_name}...")
+    """Insert a DataFrame into a PostgreSQL table using psycopg2 (TRUNCATE first)."""
+    print(f"    [SEND] Loading {len(df):,} rows -> {table_name}...")
     
     raw_conn = engine.raw_connection()
     try:
@@ -62,7 +62,7 @@ def seed_table(engine, table_name: str, df: pd.DataFrame) -> int:
             cur.execute(f"TRUNCATE TABLE {table_name} CASCADE;")
         except Exception:
             raw_conn.rollback()
-            cur = raw_conn.cursor() # reset cursor after failed truncate
+            cur = raw_conn.cursor()
             try:
                  cur.execute(f"DELETE FROM {table_name};")
             except Exception as e2:
@@ -87,7 +87,7 @@ def seed_table(engine, table_name: str, df: pd.DataFrame) -> int:
     return len(df)
 
 
-# ─── 4. Main Controller ───
+# --- 4. Main Controller ---
 def main():
     print("=" * 65)
     print("  Seed Dimension Tables - Star Schema Native Crypto")
@@ -97,30 +97,30 @@ def main():
 
     engine = sa.create_engine(DATABASE_URL)
     results = {}
-    random.seed(42)  # Cố định random
+    random.seed(42)  # Fixed random seed for reproducibility
 
-    # Khởi tạo ngày bắt đầu/kết thúc
+    # Start and end dates
     start_dt = date(2024, 1, 1)
     end_dt   = date(2030, 12, 31)
 
-    # ────────────────────────────────────────────────────────
-    # 1. Bảng dim_date & 2. Bảng dim_exchange_rate
-    # Sinh dữ liệu chung trong vòng lặp ngày để lấy tỷ giá hàng ngày
-    # ────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # 1. dim_date & 2. dim_exchange_rate
+    # Generate data together in the same date loop to produce daily FX rates
+    # ------------------------------------------------------------------
     print("[STEP] [1/5] & [2/5] Seeding dim_date & dim_exchange_rate...")
     date_rows = []
     fx_rows = []
     
     current_date = start_dt
     
-    # Giả lập biến động tỷ giá (Bắt đầu với mức hối đoái 24,500)
+    # Simulate exchange rate fluctuation (starting at 24,500 VND/USD)
     current_rate = 24500.0
 
     while current_date <= end_dt:
         date_key = int(current_date.strftime("%Y%m%d"))
         dow = current_date.isoweekday()
         
-        # 1. Dòng Date
+        # 1. Date row
         date_rows.append({
             "date_key": date_key,
             "full_date": current_date.isoformat(),
@@ -131,11 +131,11 @@ def main():
             "year": current_date.year,
         })
         
-        # 2. Dòng FX Rate (Tỷ giá USD/VND biến động +- 15 VND mỗi ngày)
+        # 2. FX Rate row (USD/VND fluctuates +/- 15 VND per day)
         fluctuation = random.uniform(-15.0, 15.0)
         current_rate += fluctuation
         
-        # Chặn biên độ tỷ giá không rớt quá thấp hoặc cao quá vô lý
+        # Clamp exchange rate within a realistic range
         current_rate = max(23000.0, min(current_rate, 26500.0))
         
         fx_rows.append({
@@ -150,9 +150,9 @@ def main():
     results["dim_exchange_rate"] = seed_table(engine, "dim_exchange_rate", pd.DataFrame(fx_rows))
 
 
-    # ────────────────────────────────────────────────────────
-    # 3. Bảng dim_time
-    # ────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # 3. dim_time
+    # ------------------------------------------------------------------
     print("[STEP] [3/5] Seeding dim_time...")
     time_rows = []
     for h in range(24):
@@ -175,25 +175,25 @@ def main():
     results["dim_time"] = seed_table(engine, "dim_time", pd.DataFrame(time_rows))
 
 
-    # ────────────────────────────────────────────────────────
-    # 4. Bảng dim_volume_category
-    # ────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # 4. dim_volume_category
+    # ------------------------------------------------------------------
     print("[STEP] [4/5] Seeding dim_volume_category...")
     df_vol = pd.DataFrame(VOLUME_CATEGORIES)
     results["dim_volume_category"] = seed_table(engine, "dim_volume_category", df_vol)
 
 
-    # ────────────────────────────────────────────────────────
-    # 5. Bảng dim_crypto_pair
-    # ────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # 5. dim_crypto_pair
+    # ------------------------------------------------------------------
     print("[STEP] [5/5] Seeding dim_crypto_pair...")
     df_pair = pd.DataFrame(CRYPTO_PAIRS)
     results["dim_crypto_pair"] = seed_table(engine, "dim_crypto_pair", df_pair)
 
 
-    # Tổng kết
+    # Summary
     print(f"\n{'='*65}")
-    print("[DONE] KẾT QUẢ SEED (PostgreSQL):")
+    print("[DONE] SEED RESULTS (PostgreSQL):")
     for table, count in results.items():
         print(f"   {table:30s} -> {count:>8,} rows")
     print("=" * 65)

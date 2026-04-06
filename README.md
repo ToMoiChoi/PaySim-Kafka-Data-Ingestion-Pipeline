@@ -1,104 +1,91 @@
-# Real-time Data Pipeline for Fin-tech: Phân tích Giao dịch & Tính điểm Thưởng
+# Real-time Crypto Data Pipeline: Binance Trade Analysis and Anomaly Detection
 
-Dự án này triển khai một pipeline dữ liệu thời gian thực cho lĩnh vực Fin-tech, tập trung vào việc xử lý các giao dịch thanh toán (PaySim), kiểm soát trùng lặp (Deduplication), làm giàu dữ liệu (Data Enrichment) và tính toán điểm thưởng (Reward Points) tự động.
+This project implements a real-time data pipeline for cryptocurrency data, focusing on processing live trade streams from the Binance WebSocket, idempotent deduplication, volume classification (Retail, Whale, etc.), and dual-sink storage to PostgreSQL and BigQuery.
 
 ---
 
-## 🏗️ Kiến trúc Hệ thống (Architecture)
+## Architecture
 
-Hệ thống được thiết kế theo mô hình **Lambda Architecture** (phần Speed Layer) với các thành phần chính:
+The system follows a **Lambda Architecture** design (focused on the Speed Layer) with the following components:
 
-1.  **Data Source (Core Banking Simulation)**: Sử dụng kịch bản Python (`kafka_producer.py`) đọc dataset PaySim để đẩy luồng giao dịch vào Kafka.
-2.  **Message Broker**: **Apache Kafka** đóng vai trò là lớp đệm (buffer) cho dữ liệu streaming.
-3.  **Stream Processing**: **Apache Spark Structured Streaming** thực hiện:
-    *   Khử trùng lặp giao dịch (Deduplication) dựa trên `transaction_id` và `Watermark`.
-    *   Tích hợp dữ liệu tĩnh (Stream-Static Join) từ PostgreSQL để lấy hạng thành viên và hệ số thưởng.
-    *   Tính toán điểm thưởng theo logic nghiệp vụ phức tạp.
-4.  **Data Warehouse (Star Schema)**: **PostgreSQL** lưu trữ dữ liệu đã xử lý phục vụ báo cáo và Dashboard.
-5.  **Backup Sink**: Hỗ trợ ghi dữ liệu ra định dạng Parquet để nạp vào **Google BigQuery**.
+1.  **Data Source (Binance WebSocket)**: Collects free real-time data from Binance (pairs: BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT).
+2.  **Message Broker**: **Apache Kafka** acts as the buffer layer for streaming data. The `live_producer.py` script fetches WebSocket data, reformats the payload, and pushes it to the Kafka topic `payment_events_v3`.
+3.  **Stream Processing**: **Apache Spark Structured Streaming** (`spark_processor.py`) performs:
+    *   **Natural Deduplication**: Based on `transaction_id` (generated as UUID from the original `trade_id`) and a 5-minute `Watermark`.
+    *   **Dual Sink Writing**: Pushes data simultaneously to two data warehouses.
+4.  **Data Warehouse (PostgreSQL)**: **PostgreSQL** is the Primary Sink, storing real-time data into the `fact_binance_trades` table using UPSERT (ON CONFLICT DO UPDATE).
+5.  **Backup Sink (Google BigQuery)**: Stores batches in Parquet format via an asynchronous mechanism and auto-loads them to **Google BigQuery**.
 
 ```mermaid
 graph TD
-    A[PaySim Dataset] --> B[Kafka Producer]
-    B -- "Topic: payment_events" --> C[Spark Streaming]
-    D[(PostgreSQL Dimensions)] -- "JDBC Lookup" --> C
-    C -- "Deduplication & Rewards" --> C
-    C -- "Primary Sink (UPSERT)" --> E[(PostgreSQL Fact)]
-    C -- "Backup Sink (Parquet)" --> F[Google BigQuery]
+    A[Binance WebSocket] --> B[Kafka Live Producer]
+    B -- "Topic: payment_events_v3" --> C[Spark Streaming]
+    C -- "Deduplication & Classification" --> C
+    C -- "Primary Sink (UPSERT)" --> E[(PostgreSQL: fact_binance_trades)]
+    C -- "Backup Sink (Parquet Async)" --> F[Google BigQuery]
 ```
 
 ---
 
-## ✨ Tính năng Nổi bật
+## Key Features
 
-*   **Kiểm soát Trùng lặp (Deduplication)**: Sử dụng cơ chế `withWatermark` và `dropDuplicates` của Spark để loại bỏ các giao dịch bị lặp lại trong vòng 5 phút (có test bằng Fault Injection 10% dữ liệu trùng).
-*   **Làm giàu dữ liệu thời gian thực (Real-time Enrichment)**: Thực hiện Join luồng Stream với các bảng Dim tĩnh trong PostgreSQL để lấy thông tin khách hàng mà không cần dữ liệu phải có sẵn trong Kafka payload.
-*   **Logic Điểm thưởng Nâng cao**: 
-    *   `Reward = Amount * Multiplier(TransactionType) * Multiplier(UserTier)`
-    *   Hạng Diamond: x2.0, Gold: x1.5, Standard: x1.0.
-*   **Tối ưu hóa trên Windows**: Cấu hình sẵn môi trường Spark chạy trên Windows (Winutils, SPARK_LOCAL_IP, Memory tuning 3GB).
-*   **Cơ chế Ghi Idempotent**: Sử dụng kỹ thuật UPSERT (INSERT ... ON CONFLICT) qua bảng Staging để đảm bảo dữ liệu không bị sai lệch khi Job Spark khởi động lại.
+*   **Idempotent Deduplication**: The Binance WebSocket may replay trades on reconnect. To handle this, `transaction_id` is generated deterministically using UUID5 from the original `trade_id`. Combined with Spark's `withWatermark` and `dropDuplicates`, the system completely eliminates duplicate data without relying on mock data.
+*   **Volume Classification and Anomaly Detection**: Automatically classifies trade volume: `< $10k` (RETAIL), `> $10k` (PROFESSIONAL), `> $100k` (INSTITUTIONAL), and `> $1M` (WHALE). Flags `is_anomaly = True` for whale-sized orders.
+*   **PySpark Optimisation on Windows**: Resolved common issues when running PySpark locally on Windows (`Winutils`, `SPARK_LOCAL_IP` configuration, memory allocation, `BlockManagerId NullPointerException`).
+*   **Dual-Sink Asynchronous**: Spark writes at high speed in `foreachBatch`. The main thread (synchronous) performs UPSERT to PostgreSQL via JDBC, while a background thread (asynchronous) collects data into Parquet format and uploads sequentially to BigQuery, so checkpoint latency is not affected.
 
 ---
 
-## 📊 Mô hình Dữ liệu (Star Schema)
+## Data Model
 
-Hiện tại hệ thống hỗ trợ 9 bảng để phân tích chuyên sâu:
-
-*   **Fact Table**: `fact_transactions` (Lưu vết giao dịch + Điểm thưởng).
-*   **Dimension Tables**:
-    *   `dim_users`: Thông tin người dùng và phân hạng.
-    *   `dim_account`: Thông tin tài khoản (Debit, Credit, E-Wallet).
-    *   `dim_merchants`: Thông tin đơn vị chấp nhận thanh toán.
-    *   `dim_transaction_type`: Các loại giao dịch và hệ số điểm thưởng tương ứng.
-    *   `dim_location`: Thông tin địa lý (Tỉnh/Thành Việt Nam).
-    *   `dim_date`: Phân tích theo Ngày/Tháng/Quý/Năm.
-    *   `dim_time`: Phân tích theo Giờ/Phút/Khung giờ (Sáng, Trưa, Chiều, Tối).
-    *   `dim_channel`: Kênh giao dịch (App iOS, Android, Web, ATM, POS).
+The system currently stores the crypto fact streaming data at:
+*   **Fact Table**: `fact_binance_trades`
+    - Main fields: `transaction_id` (PK, auto-generated UUID), `trade_id`, `crypto_symbol`, `price`, `quantity`, `amount_usd`, `is_buyer_maker`, `volume_category`, `is_anomaly`.
+    - Pre-computed dimension keys `date_key` and `time_key` to support dashboard queries.
 
 ---
 
-## 🚀 Hướng dẫn Chạy Hệ thống
+## How to Run the System
 
-### 1. Khởi động hạ tầng
+### 1. Start infrastructure
+Requires Docker Desktop to be running. Start Kafka, Zookeeper, and PostgreSQL (if applicable):
 ```powershell
-docker-compose up -d
+make start-kafka
 ```
 
-### 2. Cấu hình Database & Seed dữ liệu
+### 2. Configure Database
+Set up the schema (Star Schema / Fact tables) in the Database:
 ```powershell
-# Chạy script tạo bảng
-python warehouse/postgres_schema.py
-
-# Nạp dữ liệu danh mục mẫu
-python warehouse/seed_dimensions_pg.py
+make setup-pg    # Setup for PostgreSQL
+make setup-bq    # Setup for BigQuery (if API Keys are configured)
 ```
 
-### 3. Chạy Pipeline
-Mở 2 Terminal:
-*   **Terminal 1 (Spark)**: `python processor/spark_processor.py`
-*   **Terminal 2 (Producer)**: `python producer/kafka_producer.py` (batch lịch sử)
+### 3. Run Pipeline (Live Mode)
+Open 2 Terminals to monitor data flowing through the pipeline:
+*   **Terminal 1 (Start the WebSocket livestream)**:
+    ```powershell
+    make run-live
+    ```
+*   **Terminal 2 (Start the Spark Dual Sink Processor)**:
+    ```powershell
+    make run-spark
+    ```
 
-### 4. Chạy Demo Real-time
-Mở 2 Terminal:
-*   **Terminal 1 (Spark)**: `python processor/spark_processor.py`
-*   **Terminal 2 (Live Producer)**: `python producer/live_producer.py` (giao dịch liên tục)
-
-### 5. Kiểm tra Dữ liệu Data Warehouse (PostgreSQL)
-Sau khi chạy luồng giao dịch, bạn có thể kiểm tra xem dữ liệu đã vào Database chưa bằng script dưới đây:
+### 4. Check Data Integrity
+Data will be continuously processed, deduplicated, and UPSERTED into PostgreSQL. Verify with:
 ```powershell
-python scripts/check_pg_data.py
-# Hoặc dùng Makefile: make check-db
+make check-db
 ```
+*(You can also run `make reconcile` to compare the row count in the DB against total Kafka events)*
 
 ---
 
-## 🛠️ Xử lý lỗi thường gặp (Troubleshooting)
+## Troubleshooting
 
-1.  **Lỗi Winutils (Hadoop)**: Đã cấu hình `HADOOP_HOME` trỏ về `C:\hadoop`. Nếu mất file, hãy tải lại `winutils.exe` cho Hadoop 3.2.2.
-2.  **Lỗi OutOfMemory**: Spark Session đã được nâng cấp lên 3GB RAM. Đảm bảo máy tính còn trống tối thiểu 4GB RAM khi chạy.
-3.  **Lỗi ConnectionReset (Py4J)**: Thường do lỗi Hostname trên Windows, đã xử lý bằng lệnh `os.environ["SPARK_LOCAL_IP"] = "127.0.0.1"`.
-4.  **Lỗi Foreign Key Violation**: Đảm bảo chạy `python warehouse/seed_dimensions_pg.py` trước khi chạy Pipeline để nạp đầy đủ dữ liệu Dimension Tables.
+1.  **Winutils (Hadoop) error on Windows**: Requires the directory `C:\hadoop\bin` containing `winutils.exe`. The system automatically adds this path through environment variables.
+2.  **ConnectionReset (Py4J) / Hostname binding error**: Usually caused by Windows DNS resolution issues. `spark_processor.py` binds to `SPARK_LOCAL_IP="127.0.0.1"` by default.
+3.  **Kafka connection timeout**: The first time Kafka Docker starts, it may take 5-10 seconds for Zookeeper to become ready. Wait a moment and check logs with `make logs`.
+4.  **Google BigQuery upload error**: Make sure you have provided the service account credentials JSON file through the `.env` configuration.
 
 ---
-*Dự án thuộc khuôn khổ đồ án KLTN - ToMoiChoi/PaySim-Kafka-Data-Ingestion-Pipeline*
+*This project is part of the thesis work -- ToMoiChoi/PaySim-Kafka-Data-Ingestion-Pipeline*

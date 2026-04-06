@@ -1,21 +1,21 @@
 """
-bq_reconcile.py - Đối soát dữ liệu BigQuery vs Kafka
+bq_reconcile.py - BigQuery vs Kafka Data Reconciliation
 ======================================================
-Mục đích: Kiểm tra xem số row trong fact_transactions có khớp
-           với số message Kafka đã produce hay không.
+Purpose: Check whether the row count in fact_binance_trades matches
+         the number of messages produced to Kafka.
 
-Cách chạy:
+Usage:
     python bq_reconcile.py
 
-Kết quả:
-    - Bảng so sánh Kafka messages vs BigQuery rows
+Output:
+    - Comparison table: Kafka messages vs BigQuery rows
     - Match percentage
-    - Exit code 0 nếu match ≥ 90%, 1 nếu thấp hơn
+    - Exit code 0 if match >= 90%, 1 if lower
 
-Yêu cầu:
-    - BQ_PROJECT_ID, BQ_DATASET đặt trong .env
-    - GOOGLE_APPLICATION_CREDENTIALS trỏ tới service account JSON
-    - Kafka đang chạy tại KAFKA_BOOTSTRAP_SERVERS
+Requirements:
+    - BQ_PROJECT_ID, BQ_DATASET set in .env
+    - GOOGLE_APPLICATION_CREDENTIALS pointing to a service account JSON
+    - Kafka running at KAFKA_BOOTSTRAP_SERVERS
 """
 
 import os
@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
-# ─── Logging Setup ────────────────────────────────────────────────
+# --- Logging Setup ----------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -33,22 +33,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger("BQReconcile")
 
-# ─── Configuration ────────────────────────────────────────────────
+# --- Configuration ----------------------------------------------------
 load_dotenv()
 PROJECT_ID              = os.getenv("BQ_PROJECT_ID", "")
 DATASET_ID              = os.getenv("BQ_DATASET", "paysim_dw")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-KAFKA_TOPIC             = os.getenv("KAFKA_TOPIC", "payment_events")
+KAFKA_TOPIC             = os.getenv("KAFKA_TOPIC", "payment_events_v3")
 MATCH_THRESHOLD         = float(os.getenv("RECONCILE_THRESHOLD", "0.90"))  # 90%
 
 if not PROJECT_ID:
-    logger.error("[ERRO] Thiếu BQ_PROJECT_ID trong .env")
+    logger.error("[ERROR] BQ_PROJECT_ID is missing from .env")
     sys.exit(1)
 
 
-# ─── Helper: đếm rows BigQuery ───────────────────────────────────
-def count_bq_rows(table_name: str = "fact_transactions") -> int:
-    """Trả về số row trong bảng BigQuery."""
+# --- Helper: count BigQuery rows -------------------------------------
+def count_bq_rows(table_name: str = "fact_binance_trades") -> int:
+    """Return the number of rows in a BigQuery table."""
     try:
         from google.cloud import bigquery
         client = bigquery.Client(project=PROJECT_ID)
@@ -57,16 +57,16 @@ def count_bq_rows(table_name: str = "fact_transactions") -> int:
         for row in result:
             return int(row.cnt)
     except Exception as exc:
-        logger.warning(f"[WARN]  Không thể query BigQuery: {exc}")
+        logger.warning(f"[WARN] Could not query BigQuery: {exc}")
         return -1
     return 0
 
 
-# ─── Helper: đếm messages Kafka ──────────────────────────────────
+# --- Helper: count Kafka messages ------------------------------------
 def count_kafka_messages() -> int:
     """
-    Tính tổng số message đã produce vào topic bằng cách cộng
-    end_offset - beginning_offset của tất cả partition.
+    Calculate total messages produced to the topic by summing
+    end_offset - beginning_offset across all partitions.
     """
     try:
         from kafka import KafkaConsumer, TopicPartition
@@ -82,7 +82,7 @@ def count_kafka_messages() -> int:
 
         partitions = consumer.partitions_for_topic(KAFKA_TOPIC)
         if not partitions:
-            logger.warning(f"[WARN]  Topic '{KAFKA_TOPIC}' không tồn tại hoặc chưa có data.")
+            logger.warning(f"[WARN] Topic '{KAFKA_TOPIC}' does not exist or has no data.")
             consumer.close()
             return -1
 
@@ -101,49 +101,47 @@ def count_kafka_messages() -> int:
         return total
 
     except Exception as exc:
-        logger.warning(f"[WARN]  Không thể kết nối Kafka: {exc}")
+        logger.warning(f"[WARN] Could not connect to Kafka: {exc}")
         return -1
 
 
-# ─── Helper: thống kê chi tiết BigQuery ──────────────────────────
+# --- Helper: detailed BigQuery stats ---------------------------------
 def bq_detail_stats() -> dict:
     """
-    Trả về thống kê giao dịch: tổng amount, avg reward_points, 
-    và số row theo ngày gần nhất.
+    Return trade statistics: total amount_usd, and row counts
+    by recent dates.
     """
     stats = {}
     try:
         from google.cloud import bigquery
         client = bigquery.Client(project=PROJECT_ID)
 
-        # Tổng amount và avg reward
+        # Total amount
         q1 = f"""
             SELECT
                 COUNT(*)           AS total_rows,
-                ROUND(SUM(amount), 2)      AS total_amount,
-                ROUND(AVG(reward_points), 2) AS avg_reward
-            FROM `{PROJECT_ID}.{DATASET_ID}.fact_transactions`
+                ROUND(SUM(amount_usd), 2) AS total_amount_usd
+            FROM `{PROJECT_ID}.{DATASET_ID}.fact_binance_trades`
         """
         for row in client.query(q1).result():
-            stats["total_rows"]    = int(row.total_rows)
-            stats["total_amount"]  = float(row.total_amount or 0)
-            stats["avg_reward"]    = float(row.avg_reward or 0)
+            stats["total_rows"]       = int(row.total_rows)
+            stats["total_amount_usd"] = float(row.total_amount_usd or 0)
 
-        # Phân bố theo type_id
+        # Distribution by volume_category
         q2 = f"""
-            SELECT type_id, COUNT(*) AS cnt
-            FROM `{PROJECT_ID}.{DATASET_ID}.fact_transactions`
-            GROUP BY type_id
+            SELECT volume_category, COUNT(*) AS cnt
+            FROM `{PROJECT_ID}.{DATASET_ID}.fact_binance_trades`
+            GROUP BY volume_category
             ORDER BY cnt DESC
         """
-        stats["by_type"] = {}
+        stats["by_category"] = {}
         for row in client.query(q2).result():
-            stats["by_type"][row.type_id] = int(row.cnt)
+            stats["by_category"][row.volume_category] = int(row.cnt)
 
-        # Top 5 ngày gần nhất
+        # Top 5 most recent dates
         q3 = f"""
-            SELECT DATE(transaction_time) AS txn_date, COUNT(*) AS cnt
-            FROM `{PROJECT_ID}.{DATASET_ID}.fact_transactions`
+            SELECT DATE(trade_time) AS txn_date, COUNT(*) AS cnt
+            FROM `{PROJECT_ID}.{DATASET_ID}.fact_binance_trades`
             GROUP BY txn_date
             ORDER BY txn_date DESC
             LIMIT 5
@@ -156,33 +154,33 @@ def bq_detail_stats() -> dict:
             })
 
     except Exception as exc:
-        logger.warning(f"[WARN]  Không lấy được detail stats: {exc}")
+        logger.warning(f"[WARN] Could not retrieve detail stats: {exc}")
 
     return stats
 
 
-# ─── Main ─────────────────────────────────────────────────────────
+# --- Main -------------------------------------------------------------
 def main():
     print()
     print("=" * 65)
-    print("  📊  BigQuery Reconciliation Report")
-    print(f"  ⏱️   {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    print(f"  🏗️   Project : {PROJECT_ID}  |  Dataset : {DATASET_ID}")
-    print(f"  -->  Kafka   : {KAFKA_BOOTSTRAP_SERVERS}  |  Topic : {KAFKA_TOPIC}")
+    print("  BigQuery Reconciliation Report")
+    print(f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"  Project : {PROJECT_ID}  |  Dataset : {DATASET_ID}")
+    print(f"  Kafka   : {KAFKA_BOOTSTRAP_SERVERS}  |  Topic : {KAFKA_TOPIC}")
     print("=" * 65)
 
-    # ── 1. Lấy số liệu ──────────────────────────────────────────
-    logger.info("🔍 Đang đếm rows trong BigQuery fact_transactions...")
-    bq_rows = count_bq_rows("fact_transactions")
+    # -- 1. Collect counts ------------------------------------------------
+    logger.info("Counting rows in BigQuery fact_binance_trades...")
+    bq_rows = count_bq_rows("fact_binance_trades")
 
-    logger.info(f"🔍 Đang đọc Kafka offsets (topic: {KAFKA_TOPIC})...")
+    logger.info(f"Reading Kafka offsets (topic: {KAFKA_TOPIC})...")
     kafka_msgs = count_kafka_messages()
 
-    # ── 2. Tính Match % ──────────────────────────────────────────
+    # -- 2. Calculate Match % ---------------------------------------------
     print()
-    print("┌─────────────────────────────────────────────────────────┐")
-    print("│            RECONCILIATION SUMMARY                       │")
-    print("├──────────────────────────────────┬──────────────────────┤")
+    print("+----------------------------------------------------------+")
+    print("|            RECONCILIATION SUMMARY                         |")
+    print("+-----------------------------------+-----------------------+")
 
     if kafka_msgs > 0:
         match_pct = (bq_rows / kafka_msgs) * 100
@@ -194,54 +192,53 @@ def main():
     bq_str    = f"{bq_rows:>12,}" if bq_rows >= 0 else "       N/A (err)"
     kafka_str = f"{kafka_msgs:>12,}" if kafka_msgs >= 0 else "       N/A (err)"
 
-    print(f"│  {'Kafka Messages Produced':<30}  │  {kafka_str}  │")
-    print(f"│  {'BigQuery fact_transactions rows':<30}  │  {bq_str}  │")
+    print(f"|  {'Kafka Messages Produced':<30}  |  {kafka_str}  |")
+    print(f"|  {'BigQuery fact rows':<30}  |  {bq_str}  |")
 
     if match_pct is not None:
-        status_icon = "[DONE]" if match_pct >= MATCH_THRESHOLD * 100 else "[ERRO]"
-        print(f"│  {'Match Percentage':<30}  │  {match_pct:>10.2f} %  │")
-        print(f"│  {'Status':<30}  │  {status_icon + ' PASS' if match_pct >= MATCH_THRESHOLD * 100 else status_icon + ' FAIL':<18}  │")
+        status_icon = "[PASS]" if match_pct >= MATCH_THRESHOLD * 100 else "[FAIL]"
+        print(f"|  {'Match Percentage':<30}  |  {match_pct:>10.2f} %  |")
+        print(f"|  {'Status':<30}  |  {status_icon:<18}  |")
     else:
-        print(f"│  {'Match Percentage':<30}  │  {'N/A (connection error)':<20}  │")
+        print(f"|  {'Match Percentage':<30}  |  {'N/A (connection error)':<20}  |")
 
-    print("└──────────────────────────────────┴──────────────────────┘")
+    print("+-----------------------------------+-----------------------+")
 
-    # ── 3. Detail stats ──────────────────────────────────────────
+    # -- 3. Detail stats ---------------------------------------------------
     if bq_rows > 0:
-        logger.info("📈 Đang lấy thống kê chi tiết từ BigQuery...")
+        logger.info("Retrieving detailed statistics from BigQuery...")
         stats = bq_detail_stats()
         if stats:
             print()
-            print("┌─────────────────────────────────────────────────────────┐")
-            print("│              DETAIL STATS (BigQuery)                    │")
-            print("├─────────────────────────────────────────────────────────┤")
-            print(f"│  Total Amount   : {stats.get('total_amount', 0):>30,.2f} VND  │")
-            print(f"│  Avg Reward Pts : {stats.get('avg_reward', 0):>30.2f} pts  │")
+            print("+----------------------------------------------------------+")
+            print("|              DETAIL STATS (BigQuery)                      |")
+            print("+----------------------------------------------------------+")
+            print(f"|  Total Amount USD : {stats.get('total_amount_usd', 0):>30,.2f}  |")
 
-            if stats.get("by_type"):
-                print("├─────────────────────────────────────────────────────────┤")
-                print("│  Transaction Types:                                     │")
-                for ttype, cnt in stats["by_type"].items():
-                    print(f"│    {ttype:<16} : {cnt:>8,} rows                         │")
+            if stats.get("by_category"):
+                print("+----------------------------------------------------------+")
+                print("|  Volume Categories:                                      |")
+                for cat, cnt in stats["by_category"].items():
+                    print(f"|    {cat:<16} : {cnt:>8,} rows                         |")
 
             if stats.get("recent_dates"):
-                print("├─────────────────────────────────────────────────────────┤")
-                print("│  Recent Activity (top 5 dates):                         │")
+                print("+----------------------------------------------------------+")
+                print("|  Recent Activity (top 5 dates):                          |")
                 for entry in stats["recent_dates"]:
-                    print(f"│    {entry['date']} : {entry['count']:>8,} rows                     │")
+                    print(f"|    {entry['date']} : {entry['count']:>8,} rows                     |")
 
-            print("└─────────────────────────────────────────────────────────┘")
+            print("+----------------------------------------------------------+")
 
     print()
 
-    # ── 4. Exit code ─────────────────────────────────────────────
+    # -- 4. Exit code ------------------------------------------------------
     if match_pct is not None and match_pct < MATCH_THRESHOLD * 100:
         logger.error(
-            f"[ERRO] Match {match_pct:.1f}% < threshold {MATCH_THRESHOLD*100:.0f}% -> EXIT 1"
+            f"[FAIL] Match {match_pct:.1f}% < threshold {MATCH_THRESHOLD*100:.0f}% -> EXIT 1"
         )
         sys.exit(1)
 
-    logger.info("[DONE] Reconciliation hoàn tất.")
+    logger.info("[DONE] Reconciliation complete.")
 
 
 if __name__ == "__main__":

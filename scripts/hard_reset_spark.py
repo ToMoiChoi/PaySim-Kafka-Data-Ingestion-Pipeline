@@ -1,35 +1,35 @@
 """
-scripts/hard_reset_spark.py - Script làm sạch môi trường Spark & PostgreSQL
+scripts/hard_reset_spark.py - Clean up Spark environment and PostgreSQL
 ===========================================================================
-Chạy kịch bản này để dọn dẹp các truy vấn đang bị treo do Spark đẩy 2.3 triệu dòng trực tiếp.
+Run this script to remove stale checkpoints and truncate fact tables.
 """
 
 import os
 import shutil
 import psycopg2
 
-print("1. Xoa Spark Checkpoint...")
+print("1. Removing Spark Checkpoint...")
 for base in [r"C:\tmp", r"\tmp"]:
     chk = os.path.join(base, "spark_checkpoint_dual_sink_v2")
     if os.path.exists(chk):
         try:
             shutil.rmtree(chk)
-            print(f"  -> Da xoa: {chk}")
+            print(f"  -> Removed: {chk}")
         except Exception as e:
-            print(f"  -> Khong the xoa (Co the Spark van dang chay): {e}")
+            print(f"  -> Could not remove (Spark may still be running): {e}")
 
-print("2. Don dep PostgreSQL Staging & Fact Tables tren Local...")
+print("2. Cleaning up PostgreSQL staging and fact tables...")
 try:
     conn = psycopg2.connect("postgresql://paysim:paysim123@localhost:5432/paysim_dw")
     cur = conn.cursor()
-    cur.execute("TRUNCATE TABLE fact_transactions;")
-    print("  -> Da TRUNCATE fact_transactions")
+    cur.execute("TRUNCATE TABLE fact_binance_trades;")
+    print("  -> TRUNCATED fact_binance_trades")
     
     for i in range(5):
         cur.execute(f"DROP TABLE IF EXISTS fact_transactions_staging_{i};")
     conn.commit()
-    print("  -> Da DROP cac staging tables cu")
+    print("  -> Dropped legacy staging tables")
 except Exception as e:
-    print(f"  -> Loi PostgreSQL: {e}")
+    print(f"  -> PostgreSQL error: {e}")
 
-print("Hoan tat!")
+print("Done.")

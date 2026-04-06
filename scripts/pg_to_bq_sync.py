@@ -1,8 +1,8 @@
 """
-scripts/pg_to_bq_sync.py - Job đồng bộ dữ liệu toàn bộ Star Schema
+scripts/pg_to_bq_sync.py - Full Star Schema data synchronisation job
 ==========================================================================
-Dùng cho luồng Batch Processing. 
-Đồng bộ cả `fact_transactions` lẫn các bảng `dim_...` từ PostgreSQL lên BigQuery.
+Used for the Batch Processing workflow.
+Syncs all tables (fact_binance_trades and dim_... tables) from PostgreSQL to BigQuery.
 """
 
 import os
@@ -10,7 +10,7 @@ import sys
 import pandas as pd
 from dotenv import load_dotenv
 
-# Thêm thư mục gốc vào PATH để import được bigquery_schema
+# Add root directory to PATH so we can import bigquery_schema
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 load_dotenv()
@@ -26,7 +26,7 @@ PG_USER     = os.getenv("POSTGRES_USER", "paysim")
 PG_PASSWORD = os.getenv("POSTGRES_PASSWORD", "paysim123")
 
 if not BQ_PROJECT_ID:
-    print("❌ LỖI: Chưa cấu hình BQ_PROJECT_ID trong file .env")
+    print("[ERROR] BQ_PROJECT_ID is not configured in .env")
     sys.exit(1)
 
 TABLES_TO_SYNC = [
@@ -39,17 +39,17 @@ TABLES_TO_SYNC = [
 ]                                                                                     
 
 def sync_table(table_name, db_url):
-    print(f"\n🔄 Đang lấy dữ liệu bảng '{table_name}' từ PostgreSQL...")
+    print(f"\n[SYNC] Fetching table '{table_name}' from PostgreSQL...")
     df = pd.read_sql_query(f"SELECT * FROM {table_name}", db_url)
     
     if df.empty:
-        print(f"⚠️ Bảng '{table_name}' không có dữ liệu!")
+        print(f"[WARN] Table '{table_name}' has no data.")
         return
 
-    # Fix kiểu dữ liệu cho fact_binance_trades
+    # Fix data types for fact_binance_trades
     if table_name == "fact_binance_trades":
         try:
-            # Convert Decimal → float → khớp BigQuery FLOAT64
+            # Convert Decimal -> float to match BigQuery FLOAT64
             df['price'] = df['price'].astype(float)
             df['quantity'] = df['quantity'].astype(float)
             df['amount_usd'] = df['amount_usd'].astype(float)
@@ -57,13 +57,13 @@ def sync_table(table_name, db_url):
         except Exception:
             pass
             
-    # Fix kiểu dữ liệu Thời gian cho BigQuery
+    # Fix date/time types for BigQuery compatibility
     if table_name == "dim_date" and "full_date" in df.columns:
         df["full_date"] = pd.to_datetime(df["full_date"])
     if table_name == "dim_time" and "time_val" in df.columns:
         df["time_val"] = df["time_val"].astype(str)
 
-    print(f"✅ Đã tải {len(df):,} dòng. Đang Upload lên BigQuery ({table_name})...")
+    print(f"[OK] Loaded {len(df):,} rows. Uploading to BigQuery ({table_name})...")
     
     try:
         from google.cloud import bigquery
@@ -78,19 +78,19 @@ def sync_table(table_name, db_url):
         job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
         job.result()  
         
-        print(f"🎉 HOÀN TẤT ({table_name})!")
+        print(f"[DONE] Upload complete ({table_name}).")
     except Exception as e:
-        print(f"❌ LỖI Upload bảng {table_name}: {e}")
+        print(f"[ERROR] Failed to upload table {table_name}: {e}")
 
 def sync_all():
-    print(f"🚀 BẮT ĐẦU ĐỒNG BỘ TOÀN BỘ DATA WAREHOUSE LÊN BIGQUERY")
+    print(f"[START] SYNCHRONISING FULL DATA WAREHOUSE TO BIGQUERY")
     print(f"===========================================================")
     DATABASE_URL = f"postgresql+psycopg2://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
     
     for table in TABLES_TO_SYNC:
         sync_table(table, DATABASE_URL)
         
-    print("\n✅✅ ĐỒNG BỘ THÀNH CÔNG TẤT CẢ 9 BẢNG! Kho dữ liệu BigQuery đã SẴN SÀNG CHO POWER BI!")
+    print("\n[DONE] All tables synchronised successfully. BigQuery warehouse is READY FOR POWER BI.")
 
 if __name__ == "__main__":
     sync_all()

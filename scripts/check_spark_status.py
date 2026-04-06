@@ -10,7 +10,7 @@ paths_to_check = [
 
 print("--- Checkpoint Paths ---")
 for p in paths_to_check:
-    target = os.path.join(p, "spark_checkpoint_dual_sink_v2")
+    target = os.path.join(p, "spark_checkpoint_binance_v4")
     if os.path.exists(target):
         print(f"FOUND: {target}")
         offset_file = os.path.join(target, "offsets")
@@ -27,14 +27,9 @@ try:
     tables = [t[0] for t in cur.fetchall()]
     
     print("\n--- PostgreSQL Tables ---")
-    stg = [t for t in tables if "fact_transactions_staging" in t]
-    print(f"Staging tables found: {stg}")
-    for s in stg:
-        cur.execute(f"SELECT COUNT(*) FROM {s}")
-        print(f"{s} count: {cur.fetchone()[0]}")
-    
-    cur.execute("SELECT COUNT(*) FROM fact_transactions")
-    print(f"fact_transactions count: {cur.fetchone()[0]}")
+    for t in tables:
+        cur.execute(f"SELECT COUNT(*) FROM {t}")
+        print(f"{t} count: {cur.fetchone()[0]}")
     
 except Exception as e:
     print(f"Postgres Error: {e}")

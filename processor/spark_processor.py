@@ -1,14 +1,14 @@
 """
 processor/spark_processor.py - Dual-Sink Spark Structured Streaming
 ====================================================================
-Thiết kế pipeline xử lý dữ liệu streaming từ Binance WebSocket:
-  1. Đọc stream từ Kafka topic `payment_events_v3`.
-  2. Parse JSON schema nguyên bản (Không có Fake Data).
-  3. Watermark (5 phút) + dropDuplicates(transaction_id) - Kiểm soát trùng lặp tự nhiên.
+Streaming data pipeline designed for processing Binance WebSocket data:
+  1. Read stream from Kafka topic `payment_events_v3`.
+  2. Parse the native JSON schema (no fake data).
+  3. Watermark (5 minutes) + dropDuplicates(transaction_id) -- natural deduplication.
   4. Transform -> Schema fact_binance_trades.
   5. foreachBatch - Dual Sink:
-       a. [PRIMARY]  Ghi vào PostgreSQL  (UPSERT qua JDBC, real-time).
-       b. [BACKUP]   Ghi Parquet -> Load Job lên BigQuery (batch, miễn phí Sandbox).
+       a. [PRIMARY]  Write to PostgreSQL  (UPSERT via JDBC, real-time).
+       b. [BACKUP]   Write Parquet -> Load Job to BigQuery (batch, free Sandbox).
 """
 
 import os
@@ -26,7 +26,7 @@ from pyspark.sql.types import (
 )
 from dotenv import load_dotenv
 
-# ─── Logging ─────────────────────────────────────────────────────
+# --- Logging 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -34,7 +34,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("SparkDualSink")
 
-# ─── Config ──────────────────────────────────────────────────────
+# --- Config 
 load_dotenv()
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
@@ -55,7 +55,7 @@ BQ_TABLE_FACT = "fact_binance_trades"
 GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 BQ_PARQUET_DIR = os.getenv("BQ_PARQUET_BACKUP_DIR", "/tmp/bq_backup")
 
-# ─── Kafka Schema ────────────────────────────────────────────────
+# --- Kafka Schema
 binance_schema = StructType([
     StructField("transaction_id",  StringType(),  True),
     StructField("trade_id",        LongType(),    True),
@@ -72,7 +72,7 @@ binance_schema = StructType([
 ])
 
 
-# ─── Spark Session ───────────────────────────────────────────────
+# --- Spark Session 
 def create_spark_session() -> SparkSession:
     # Set Hadoop Home for Windows environment explicitly
     os.environ["HADOOP_HOME"] = r"C:\hadoop"
@@ -108,8 +108,8 @@ def create_spark_session() -> SparkSession:
 
 def build_fact_df(spark: SparkSession, parsed_df: DataFrame) -> DataFrame:
     """
-    Biến đổi dữ liệu gốc thành Schema lưu trữ.
-    Bao gồm cơ chế Tự Động Kiểm Soát Trùng Lặp (Deduplication) dưa trên Idempotent UUID.
+    Transform raw data into the storage schema.
+    Includes automatic deduplication control based on Idempotent UUID.
     """
     # 1. Cast event_timestamp string to native TimestampType
     typed_df = parsed_df.withColumn(
@@ -117,8 +117,8 @@ def build_fact_df(spark: SparkSession, parsed_df: DataFrame) -> DataFrame:
     )
 
     # 2. Watermark & Drop Duplicates (Stateful Streaming)
-    # Khử trùng lặp tự nhiên khi Binance Replay giao dịch cũ lúc reconnect.
-    # Do transaction_id được sinh tĩnh (deterministic) từ trade_id, UUID sẽ giống hệt nhau.
+    # Natural deduplication when Binance replays old trades on reconnect.
+    # Since transaction_id is generated deterministically from trade_id, the UUID is always identical.
     clean_df = (
         typed_df
         .withWatermark("event_timestamp", "5 minutes")
@@ -132,16 +132,16 @@ def build_fact_df(spark: SparkSession, parsed_df: DataFrame) -> DataFrame:
             when(col("event_timestamp").isNull(), current_timestamp())
             .otherwise(col("event_timestamp"))
         )
-        # Sinh date_key (yyyyMMdd)
+        # Generate date_key (yyyyMMdd)
         .withColumn("date_key", date_format(col("trade_time"), "yyyyMMdd").cast("long"))
-        # Sinh time_key (Ví dụ 14:30 -> 1430)
+        # Generate time_key (e.g. 14:30 -> 1430)
         .withColumn("time_key", (expr("hour(trade_time)") * 100 + expr("minute(trade_time)")).cast("long"))
         .withColumn("price",      col("price").cast("decimal(38,9)"))
         .withColumn("quantity",   col("quantity").cast("decimal(38,9)"))
         .withColumn("amount_usd", col("amount_usd").cast("decimal(38,9)"))
     )
 
-    # 4. Filter Schema Chuẩn fact_binance_trades
+    # 4. Select final columns for fact_binance_trades
     final_fact_df = base_df.select(
         "transaction_id", "trade_id", "crypto_symbol",
         "date_key", "time_key", "trade_time", 
@@ -153,12 +153,12 @@ def build_fact_df(spark: SparkSession, parsed_df: DataFrame) -> DataFrame:
     return final_fact_df
 
 
-# ─── Sink 1: PostgreSQL (Primary, real-time) ─────────────────────
+# --- Sink 1: PostgreSQL (Primary, real-time) --------------------------
 def write_to_postgres(rows: list, batch_id: int, row_count: int):
-    """Ghi batch vào PostgreSQL bằng psycopg2 execute_values (FAST UPSERT)."""
+    """Write batch to PostgreSQL using psycopg2 execute_values (FAST UPSERT)."""
     t0 = time.time()
 
-    # Cột theo thứ tự schema fact_binance_trades
+    # Columns in fact_binance_trades order
     cols = [
         "transaction_id", "trade_id", "crypto_symbol",
         "date_key", "time_key", "trade_time",
@@ -202,14 +202,14 @@ def write_to_postgres(rows: list, batch_id: int, row_count: int):
     )
 
 
-# ─── Sink 2: BigQuery Backup (batch Parquet -> Load Job) ──────────
+# --- Sink 2: BigQuery Backup (batch Parquet -> Load Job) --------------
 import threading
 
 BQ_BUFFER = []
 BQ_BUFFER_LOCK = threading.Lock()
 LAST_BQ_UPLOAD_TIME = time.time()
-BQ_UPLOAD_INTERVAL_SEC = 10  # Đẩy lên BQ mỗi 10 giây
-BQ_UPLOAD_ROWS_LIMIT = 5000  # Hoặc khi đủ 5000 báo cáo giao dịch
+BQ_UPLOAD_INTERVAL_SEC = 10  # Upload to BQ every 10 seconds
+BQ_UPLOAD_ROWS_LIMIT = 5000  # Or when the buffer reaches 5000 rows
 
 def dual_sink_batch(batch_df: DataFrame, batch_id: int):
     global LAST_BQ_UPLOAD_TIME
@@ -225,7 +225,7 @@ def dual_sink_batch(batch_df: DataFrame, batch_id: int):
     try:
         write_to_postgres(rows, batch_id, row_count)
     except Exception as e:
-        logger.error(f"[Batch {batch_id}] [ERRO] PostgreSQL sink lỗi: {e}")
+        logger.error(f"[Batch {batch_id}] [ERROR] PostgreSQL sink failed: {e}")
 
     # Sink 2: BigQuery Async 
     try:
@@ -243,14 +243,14 @@ def dual_sink_batch(batch_df: DataFrame, batch_id: int):
                 LAST_BQ_UPLOAD_TIME = time.time()
                 
             if len(upload_data) > 0:
-                logger.info(f"[BQ Buffer Flush] Gom được {len(upload_data):,} dòng trong {int(time_since_last_upload)} sec. Uploading...")
+                logger.info(f"[BQ Buffer Flush] Collected {len(upload_data):,} rows in {int(time_since_last_upload)} sec. Uploading...")
                 threading.Thread(
                     target=_bq_async_upload,
                     args=(upload_data, batch_id, len(upload_data)),
                     daemon=True
                 ).start()
     except Exception as e:
-        logger.warning(f"[Batch {batch_id}] [WARN] BQ mapping lỗi: {e}")
+        logger.warning(f"[Batch {batch_id}] [WARN] BQ mapping failed: {e}")
 
     latency_ms = int((time.time() - t_start) * 1000)
     logger.info(f"[Batch {batch_id}] rows={row_count:,} | latency={latency_ms}ms | PG done, BQ async")
@@ -301,7 +301,7 @@ def _bq_async_upload(rows_dicts, batch_id, row_count):
         logger.warning(f"[BQ Async] Batch {batch_id}: {e}")
 
 
-# ─── Main ────────────────────────────────────────────────────────
+# --- Main -------------------------------------------------------------
 
 def main():
     if hasattr(sys.stdout, 'reconfigure'):
@@ -311,14 +311,14 @@ def main():
         
     print("=" * 65)
     print("--> Binance Crypto Streaming (PG + BQ Backup)")
-    print(f"--> Khử duplicate tự nhiên thông qua Idempotent UUID")
-    print(f"--> Phân hạng Volume & Phát hiện Anomaly nguyên bản")
+    print(f"--> Natural deduplication via Idempotent UUID")
+    print(f"--> Volume classification and native Anomaly detection")
     print("=" * 65)
 
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("WARN")
 
-    # 1. Đọc Kafka stream
+    # 1. Read Kafka stream
     kafka_df = (
         spark.readStream
         .format("kafka")
@@ -326,7 +326,7 @@ def main():
         .option("subscribe", KAFKA_TOPIC)
         .option("startingOffsets", "earliest")
         .option("failOnDataLoss", "false")
-        .option("maxOffsetsPerTrigger", "500")   # Giới hạn nhỏ → batch nhỏ → latency thấp
+        .option("maxOffsetsPerTrigger", "500")   # Small limit -> small batches -> low latency
         .load()
     )
 
@@ -350,11 +350,11 @@ def main():
         .outputMode("append")
         .foreachBatch(dual_sink_batch)
         .trigger(processingTime=TRIGGER_INTERVAL)
-        .option("checkpointLocation", "/tmp/spark_checkpoint_binance_v4") # Đổi tên checkpoint directory 
+        .option("checkpointLocation", "/tmp/spark_checkpoint_binance_v4")
         .start()
     )
 
-    logger.info("[DONE] Stream đang chạy. Nhấn Ctrl+C để dừng.")
+    logger.info("[DONE] Stream is running. Press Ctrl+C to stop.")
     query.awaitTermination()
 
 

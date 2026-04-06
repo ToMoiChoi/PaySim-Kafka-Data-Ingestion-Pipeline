@@ -1,16 +1,16 @@
 """
-warehouse/bigquery_schema.py - Tạo Star Schema trên Google BigQuery
+warehouse/bigquery_schema.py - Create Star Schema on Google BigQuery
 ==============================================================
-Chạy script này để khởi tạo bộ Schema mới (Native Crypto) lên Google BigQuery.
-- Khởi tạo 1 Fact table (fact_binance_trades)
-- Khởi tạo 5 Dimension tables (dim_date, dim_time, dim_volume_category, dim_crypto_pair, dim_exchange_rate)
+Run this script to set up the new schema (Native Crypto) on Google BigQuery.
+- Creates 1 Fact table (fact_binance_trades)
+- Creates 5 Dimension tables (dim_date, dim_time, dim_volume_category, dim_crypto_pair, dim_exchange_rate)
 """
 
 import os
 from dotenv import load_dotenv
 from google.cloud import bigquery
 
-# ─── 1. Load config ───
+# --- 1. Load config ---
 load_dotenv()
 
 PROJECT_ID = os.getenv("BQ_PROJECT_ID")
@@ -18,7 +18,7 @@ DATASET_ID = os.getenv("BQ_DATASET", "paysim_dw")
 
 def main():
     if not PROJECT_ID:
-        print("❌ LỖI: Chưa cấu hình BQ_PROJECT_ID trong .env")
+        print("[ERROR] BQ_PROJECT_ID is not configured in .env")
         return
 
     print("=" * 65)
@@ -38,17 +38,17 @@ def main():
         try:
             client.delete_table(f"{dataset_ref}.fact_transactions", not_found_ok=True)
             client.delete_table(f"{dataset_ref}.fact_binance_trades", not_found_ok=True)
-            print("  🗑️  Đã xoá các bảng cũ để làm sạch Schema.")
+            print("  Removed old tables to clean up schema.")
         except Exception as e:
             pass
             
         try:
             dataset = client.create_dataset(dataset, exists_ok=True)
-            print(f"  ✅ Đã sẵn sàng Dataset: {dataset_ref}")
+            print(f"  [OK] Dataset ready: {dataset_ref}")
         except Exception as e:
-            print(f"  ⚠️ Lỗi tạo Dataset: {e}")
+            print(f"  [WARN] Error creating dataset: {e}")
 
-        # ─── Định nghĩa Schema ───
+        # --- Schema Definitions ---
         
         TABLES = {
             "dim_date": [
@@ -106,7 +106,7 @@ def main():
             table_id = f"{dataset_ref}.{table_name}"
             table = bigquery.Table(table_id, schema=schema)
             
-            # Cấu hình đặc biệt cho bảng Fact
+            # Special configuration for the Fact table
             if table_name == "fact_binance_trades":
                 table.time_partitioning = bigquery.TimePartitioning(
                     type_=bigquery.TimePartitioningType.DAY,
@@ -114,13 +114,13 @@ def main():
                 )
                 table.clustering_fields = ["crypto_symbol", "volume_category"]
 
-            print(f"  ⏳ Đang tạo/cập nhật bảng {table_name}...")
+            print(f"  Creating/updating table {table_name}...")
             client.create_table(table, exists_ok=True)
 
-        print("\n[DONE] Toàn bộ BigQuery Star Schema ĐÃ SẴN SÀNG.")
+        print("\n[DONE] All BigQuery Star Schema tables are READY.")
 
     except Exception as e:
-        print(f"\n❌ LỖI TRONG QUÁ TRÌNH KHỞI TẠO BQ: {e}")
+        print(f"\n[ERROR] Failed during BQ schema setup: {e}")
 
 
 if __name__ == "__main__":
