@@ -10,7 +10,7 @@
 #   -> make check-db (verify)
 # ============================================================
 
-.PHONY: help install setup-bq seed-pg start-kafka stop-kafka \
+.PHONY: help install setup-bq seed-bq seed-pg start-kafka stop-kafka \
         run-live run-spark run-spark-docker reconcile clean logs
 
 # -- Colors --------------------------------------------------------
@@ -29,6 +29,7 @@ help:
 	@echo "$(YELLOW)Setup$(RESET)"
 	@echo "  make install        Install Python dependencies"
 	@echo "  make setup-bq       Create BigQuery dataset and tables"
+	@echo "  make seed-bq        Seed dimension tables to BigQuery (no PG)"
 	@echo "  make setup-pg       Create PostgreSQL Star Schema"
 	@echo "  make seed-pg        Seed dimension tables to PostgreSQL"
 	@echo ""
@@ -67,6 +68,11 @@ setup-bq:
 setup-pg:
 	@echo "$(GREEN)Creating PostgreSQL Star Schema...$(RESET)"
 	python -m warehouse.postgres_schema
+
+# -- Seed BigQuery dimension tables (direct, no PG) ------------------
+seed-bq:
+	@echo "$(GREEN)Seeding dimension tables directly to BigQuery...$(RESET)"
+	python -m warehouse.seed_dimensions_bq
 
 # -- Seed PostgreSQL dimension tables --------------------------------
 seed-pg:
