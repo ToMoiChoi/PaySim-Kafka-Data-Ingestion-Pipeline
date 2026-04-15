@@ -118,17 +118,19 @@ def main():
 
     df_recent = fetch("""
         SELECT
-            transaction_id,
-            trade_time,
-            crypto_symbol,
-            price,
-            quantity,
-            amount_usd,
-            volume_category,
-            is_buyer_maker,
-            is_anomaly
-        FROM fact_binance_trades
-        ORDER BY trade_time DESC
+            f.transaction_id,
+            f.trade_time,
+            cp.crypto_symbol,
+            f.price,
+            f.quantity,
+            f.amount_usd,
+            vc.volume_category,
+            f.is_buyer_maker,
+            f.is_anomaly
+        FROM fact_binance_trades f
+        LEFT JOIN dim_crypto_pair cp ON f.crypto_pair_key = cp.crypto_pair_key
+        LEFT JOIN dim_volume_category vc ON f.volume_category_key = vc.volume_category_key
+        ORDER BY f.trade_time DESC
         LIMIT 10;
     """)
     if not df_recent.empty:
@@ -145,14 +147,15 @@ def main():
 
     df_by_pair = fetch("""
         SELECT
-            crypto_symbol,
+            cp.crypto_symbol,
             COUNT(*)                    AS tx_count,
-            SUM(amount_usd)             AS total_volume,
-            ROUND(AVG(amount_usd), 2)   AS avg_amount,
-            MIN(amount_usd)             AS min_amount,
-            MAX(amount_usd)             AS max_amount
-        FROM fact_binance_trades
-        GROUP BY crypto_symbol
+            SUM(f.amount_usd)           AS total_volume,
+            ROUND(AVG(f.amount_usd), 2) AS avg_amount,
+            MIN(f.amount_usd)           AS min_amount,
+            MAX(f.amount_usd)           AS max_amount
+        FROM fact_binance_trades f
+        JOIN dim_crypto_pair cp ON f.crypto_pair_key = cp.crypto_pair_key
+        GROUP BY cp.crypto_symbol
         ORDER BY total_volume DESC;
     """)
     if not df_by_pair.empty:
@@ -172,12 +175,13 @@ def main():
 
     df_seg = fetch("""
         SELECT
-            volume_category,
-            COUNT(transaction_id)       AS tx_count,
-            SUM(amount_usd)             AS total_volume,
-            ROUND(AVG(amount_usd), 2)   AS avg_amount
-        FROM fact_binance_trades
-        GROUP BY volume_category
+            vc.volume_category,
+            COUNT(f.transaction_id)       AS tx_count,
+            SUM(f.amount_usd)             AS total_volume,
+            ROUND(AVG(f.amount_usd), 2)   AS avg_amount
+        FROM fact_binance_trades f
+        JOIN dim_volume_category vc ON f.volume_category_key = vc.volume_category_key
+        GROUP BY vc.volume_category
         ORDER BY total_volume DESC;
     """)
     if not df_seg.empty:
@@ -211,9 +215,11 @@ def main():
 
     # Anomalies by crypto pair
     df_anomaly_pair = fetch("""
-        SELECT crypto_symbol, COUNT(*) AS anomaly_count, SUM(amount_usd) AS anomaly_volume
-        FROM fact_binance_trades WHERE is_anomaly = True
-        GROUP BY crypto_symbol ORDER BY anomaly_count DESC;
+        SELECT cp.crypto_symbol, COUNT(*) AS anomaly_count, SUM(f.amount_usd) AS anomaly_volume
+        FROM fact_binance_trades f
+        JOIN dim_crypto_pair cp ON f.crypto_pair_key = cp.crypto_pair_key
+        WHERE f.is_anomaly = True
+        GROUP BY cp.crypto_symbol ORDER BY anomaly_count DESC;
     """)
     if not df_anomaly_pair.empty:
         print(f"\n  Anomalies by Crypto Pair:")
@@ -290,14 +296,16 @@ def main():
 
     df_top = fetch("""
         SELECT
-            transaction_id,
-            crypto_symbol,
-            price,
-            amount_usd,
-            volume_category,
-            is_anomaly
-        FROM fact_binance_trades
-        ORDER BY amount_usd DESC
+            f.transaction_id,
+            cp.crypto_symbol,
+            f.price,
+            f.amount_usd,
+            vc.volume_category,
+            f.is_anomaly
+        FROM fact_binance_trades f
+        LEFT JOIN dim_crypto_pair cp ON f.crypto_pair_key = cp.crypto_pair_key
+        LEFT JOIN dim_volume_category vc ON f.volume_category_key = vc.volume_category_key
+        ORDER BY f.amount_usd DESC
         LIMIT 10;
     """)
     if not df_top.empty:

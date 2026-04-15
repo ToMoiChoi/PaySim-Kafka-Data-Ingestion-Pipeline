@@ -7,3 +7,4 @@ credentials/
 .env
 bq_backup/
 .ivy2/
+.claude/

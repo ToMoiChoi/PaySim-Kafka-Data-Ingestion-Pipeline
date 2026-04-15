@@ -71,6 +71,9 @@ def sync_table(table_name, db_url):
         client = bigquery.Client(project=BQ_PROJECT_ID)
         table_id = f"{BQ_PROJECT_ID}.{BQ_DATASET}.{table_name}"
 
+        print(f"[SYNC] Deleting existing table {table_id} if it exists...")
+        client.delete_table(table_id, not_found_ok=True)
+
         job_config = bigquery.LoadJobConfig(
             write_disposition="WRITE_TRUNCATE",
         )

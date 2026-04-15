@@ -5,9 +5,13 @@ Run AFTER `bigquery_schema.py` has been executed to create the tables.
 
 This script populates BigQuery tables WITHOUT needing PostgreSQL:
  - dim_date & dim_time: Generated entirely by Python logic.
- - dim_volume_category: Initialises volume tiers (based on Chainalysis thresholds).
- - dim_crypto_pair: Defines the currently tracked trading pairs.
+ - dim_volume_category: Initialises volume tiers (Kimball Surrogate Keys).
+ - dim_crypto_pair: Defines tracked trading pairs (Kimball Surrogate Keys).
  - dim_exchange_rate: Generates daily USD/VND exchange rates (Random Walk simulation).
+
+Kimball Methodology:
+ - dim_volume_category: Surrogate Key volume_category_key (1-4)
+ - dim_crypto_pair: Surrogate Key crypto_pair_key (1-5)
 """
 
 import os
@@ -25,20 +29,23 @@ BQ_PROJECT_ID = os.getenv("BQ_PROJECT_ID")
 BQ_DATASET    = os.getenv("BQ_DATASET", "paysim_dw")
 
 
-# --- 2. Static Data ---
+# --- 2. Static Data (Kimball Surrogate Keys) ---
+
+# Surrogate Key mapping for dim_volume_category
 VOLUME_CATEGORIES = [
-    {"volume_category": "RETAIL",        "description": "Small trades under 10,000 USD",                    "min_usd": 0,         "max_usd": 9999.99},
-    {"volume_category": "PROFESSIONAL",  "description": "Professional individual trades 10k-100k",          "min_usd": 10000,     "max_usd": 99999.99},
-    {"volume_category": "INSTITUTIONAL", "description": "Large block / institutional trades 100k-1M",       "min_usd": 100000,    "max_usd": 999999.99},
-    {"volume_category": "WHALE",         "description": "Whale trades - anomalous orders above 1 Million",  "min_usd": 1000000,   "max_usd": 99999999999.99},
+    {"volume_category_key": 1, "volume_category": "RETAIL",        "description": "Small trades under 10,000 USD",                    "min_usd": 0,         "max_usd": 9999.99},
+    {"volume_category_key": 2, "volume_category": "PROFESSIONAL",  "description": "Professional individual trades 10k-100k",          "min_usd": 10000,     "max_usd": 99999.99},
+    {"volume_category_key": 3, "volume_category": "INSTITUTIONAL", "description": "Large block / institutional trades 100k-1M",       "min_usd": 100000,    "max_usd": 999999.99},
+    {"volume_category_key": 4, "volume_category": "WHALE",         "description": "Whale trades - anomalous orders above 1 Million",  "min_usd": 1000000,   "max_usd": 99999999999.99},
 ]
 
+# Surrogate Key mapping for dim_crypto_pair
 CRYPTO_PAIRS = [
-    {"crypto_symbol": "BTCUSDT", "base_asset": "BTC", "quote_asset": "USDT", "pair_name": "Bitcoin / TetherUS"},
-    {"crypto_symbol": "ETHUSDT", "base_asset": "ETH", "quote_asset": "USDT", "pair_name": "Ethereum / TetherUS"},
-    {"crypto_symbol": "BNBUSDT", "base_asset": "BNB", "quote_asset": "USDT", "pair_name": "Binance Coin / TetherUS"},
-    {"crypto_symbol": "SOLUSDT", "base_asset": "SOL", "quote_asset": "USDT", "pair_name": "Solana / TetherUS"},
-    {"crypto_symbol": "XRPUSDT", "base_asset": "XRP", "quote_asset": "USDT", "pair_name": "Ripple / TetherUS"},
+    {"crypto_pair_key": 1, "crypto_symbol": "BTCUSDT", "base_asset": "BTC", "quote_asset": "USDT", "pair_name": "Bitcoin / TetherUS"},
+    {"crypto_pair_key": 2, "crypto_symbol": "ETHUSDT", "base_asset": "ETH", "quote_asset": "USDT", "pair_name": "Ethereum / TetherUS"},
+    {"crypto_pair_key": 3, "crypto_symbol": "BNBUSDT", "base_asset": "BNB", "quote_asset": "USDT", "pair_name": "Binance Coin / TetherUS"},
+    {"crypto_pair_key": 4, "crypto_symbol": "SOLUSDT", "base_asset": "SOL", "quote_asset": "USDT", "pair_name": "Solana / TetherUS"},
+    {"crypto_pair_key": 5, "crypto_symbol": "XRPUSDT", "base_asset": "XRP", "quote_asset": "USDT", "pair_name": "Ripple / TetherUS"},
 ]
 
 
@@ -66,7 +73,7 @@ def main():
         return
 
     print("=" * 65)
-    print("  Seed Dimension Tables - BigQuery Direct (No PostgreSQL)")
+    print("  Seed Dimension Tables - BigQuery (Kimball Surrogate Keys)")
     print("=" * 65)
     print(f"  Project  : {BQ_PROJECT_ID}")
     print(f"  Dataset  : {BQ_DATASET}")
@@ -82,22 +89,18 @@ def main():
 
     # ------------------------------------------------------------------
     # 1. dim_date & 2. dim_exchange_rate
-    # Generate data together in the same date loop to produce daily FX rates
     # ------------------------------------------------------------------
     print("[STEP] [1/5] & [2/5] Seeding dim_date & dim_exchange_rate...")
     date_rows = []
     fx_rows = []
 
     current_date = start_dt
-
-    # Simulate exchange rate fluctuation (starting at 24,500 VND/USD)
     current_rate = 24500.0
 
     while current_date <= end_dt:
         date_key = int(current_date.strftime("%Y%m%d"))
         dow = current_date.isoweekday()
 
-        # 1. Date row
         date_rows.append({
             "date_key": date_key,
             "full_date": current_date.isoformat(),
@@ -108,11 +111,8 @@ def main():
             "year": current_date.year,
         })
 
-        # 2. FX Rate row (USD/VND fluctuates +/- 15 VND per day)
         fluctuation = random.uniform(-15.0, 15.0)
         current_rate += fluctuation
-
-        # Clamp exchange rate within a realistic range
         current_rate = max(23000.0, min(current_rate, 26500.0))
 
         fx_rows.append({
@@ -123,7 +123,6 @@ def main():
 
         current_date += timedelta(days=1)
 
-    # Convert full_date to proper date type for BigQuery DATE column
     df_date = pd.DataFrame(date_rows)
     df_date["full_date"] = pd.to_datetime(df_date["full_date"])
 
@@ -157,24 +156,24 @@ def main():
 
 
     # ------------------------------------------------------------------
-    # 4. dim_volume_category
+    # 4. dim_volume_category (Kimball Surrogate Keys: 1-4)
     # ------------------------------------------------------------------
-    print("[STEP] [4/5] Seeding dim_volume_category...")
+    print("[STEP] [4/5] Seeding dim_volume_category (SK: 1-4)...")
     df_vol = pd.DataFrame(VOLUME_CATEGORIES)
     results["dim_volume_category"] = seed_table_bq(client, "dim_volume_category", df_vol)
 
 
     # ------------------------------------------------------------------
-    # 5. dim_crypto_pair
+    # 5. dim_crypto_pair (Kimball Surrogate Keys: 1-5)
     # ------------------------------------------------------------------
-    print("[STEP] [5/5] Seeding dim_crypto_pair...")
+    print("[STEP] [5/5] Seeding dim_crypto_pair (SK: 1-5)...")
     df_pair = pd.DataFrame(CRYPTO_PAIRS)
     results["dim_crypto_pair"] = seed_table_bq(client, "dim_crypto_pair", df_pair)
 
 
     # Summary
     print(f"\n{'='*65}")
-    print("[DONE] SEED RESULTS (BigQuery Direct):")
+    print("[DONE] SEED RESULTS (BigQuery - Kimball Surrogate Keys):")
     for table, count in results.items():
         print(f"   {table:30s} -> {count:>8,} rows")
     print("=" * 65)

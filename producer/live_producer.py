@@ -1,10 +1,14 @@
 """
 Live Producer - Real-Time Binance WebSocket to Kafka Pipeline
 ================================================================
-Streaming data pipeline designed for processing Binance WebSocket data:
- - Duplicate control (Idempotent UUID generation)
- - Anomaly detection for Whale-sized trades
- - Volume classification (Retail, Professional, Institutional, Whale)
+INGESTION LAYER ONLY — Single Responsibility Principle:
+  - Connect to Binance WebSocket (public, no API key required)
+  - Receive raw trade messages
+  - Forward raw data to Kafka topic WITHOUT any business logic
+
+All data processing (cleansing, deduplication, classification,
+anomaly detection) is performed downstream by Spark Structured
+Streaming (processor/spark_processor.py).
 
 Data source: wss://stream.binance.com:9443 (free, no API key required)
 """
@@ -13,8 +17,7 @@ import json
 import os
 import sys
 import time
-import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 from dotenv import load_dotenv
 from kafka import KafkaProducer
@@ -41,85 +44,6 @@ BINANCE_WS_URL = (
 )
 
 
-def classify_transaction_volume(amount_usd: float) -> tuple[str, bool]:
-    """
-    Classify trade volume based on Chainalysis and Whale Alert thresholds.
-    Returns: (volume_category, is_anomaly)
-
-    Reference:
-      - < $10k: Retail Trade (small individual trades)
-      - $10k - $100k: Professional Trade (experienced individual traders)
-      - $100k - $1M: Institutional / Block Trade (large orders from institutions)
-      - > $1M: Whale -- triggers anomaly flag `is_anomaly = True`
-    """
-    if amount_usd >= 1_000_000:
-        return "WHALE", True
-    elif amount_usd >= 100_000:
-        return "INSTITUTIONAL", False
-    elif amount_usd >= 10_000:
-        return "PROFESSIONAL", False
-    else:
-        return "RETAIL", False
-
-
-# --- MAPPING: Binance Trade -> Kafka Payload ---------------------------
-
-def map_binance_trade_to_event(trade: dict) -> dict:
-    """
-    Map a single real Binance trade message to the Native Crypto Schema.
-    No fake data is injected at any point.
-
-    Binance trade fields:
-      - t: trade ID (unique integer)
-      - p: price (string, e.g. "87234.50")
-      - q: quantity (string, e.g. "0.00150")
-      - T: trade time (milliseconds timestamp)
-      - s: symbol (e.g. "BTCUSDT")
-      - m: is buyer the market maker? (boolean) -- True = Sell side, False = Buy side
-      - b: buyer order ID
-      - a: seller order ID
-    """
-    trade_id    = trade.get("t", int(time.time() * 1000))
-    price       = float(trade.get("p", 0.0))
-    quantity    = float(trade.get("q", 0.0))
-    trade_time  = trade.get("T", int(time.time() * 1000))
-    symbol      = trade.get("s", "UNKNOWN")
-    is_maker    = trade.get("m", False)
-    buyer_id    = trade.get("b", trade_id)
-    seller_id   = trade.get("a", trade_id)
-
-    # 1. Natural Idempotent Deduplication
-    # When the WebSocket disconnects and reconnects, Binance may replay recent trades.
-    # Spark Streaming `.dropDuplicates(["transaction_id"])` requires a stable ID.
-    # We generate transaction_id from the original `trade_id` using UUID5.
-    # This means a replayed trade will always produce the same UUID, so Spark drops it.
-    transaction_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"binance.trade.{trade_id}"))
-
-    # 2. Timestamp formatting
-    event_timestamp = datetime.fromtimestamp(trade_time / 1000, tz=timezone.utc).isoformat()
-
-    # 3. Total order value (Amount)
-    amount_usd = round(price * quantity, 2)
-
-    # 4. Volume classification based on Chainalysis thresholds
-    volume_category, is_anomaly = classify_transaction_volume(amount_usd)
-
-    return {
-        "transaction_id": transaction_id,      # Deduplication Key
-        "trade_id": trade_id,                  # Original Binance Trade ID
-        "crypto_symbol": symbol,               # Currency Pair (e.g., BTCUSDT)
-        "event_timestamp": event_timestamp,    # Original timestamp from Binance
-        "price": price,
-        "quantity": quantity,
-        "amount_usd": amount_usd,              # Trade size in USD
-        "is_buyer_maker": is_maker,            # Buy / Sell direction flag
-        "volume_category": volume_category,    # Classification (Retail, Pro, Institutional, Whale)
-        "is_anomaly": is_anomaly,              # Whale Anomaly flag (True/False)
-        "buyer_order_id": buyer_id,            # Anonymous Buyer Order ID (kept as-is)
-        "seller_order_id": seller_id           # Anonymous Seller Order ID (kept as-is)
-    }
-
-
 # --- Kafka Producer ---------------------------------------------------
 
 def create_kafka_producer() -> KafkaProducer:
@@ -131,7 +55,7 @@ def create_kafka_producer() -> KafkaProducer:
                 value_serializer=lambda v: json.dumps(v, ensure_ascii=False).encode("utf-8"),
                 acks=1,
                 retries=3,
-                compression_type="gzip",
+                compression_type="lz4",
             )
             print(f"   [OK] Connected to Kafka (attempt {attempt})")
             return producer
@@ -143,7 +67,7 @@ def create_kafka_producer() -> KafkaProducer:
     raise ConnectionError(f"[ERROR] Could not connect to Kafka after {MAX_RETRIES} attempts")
 
 
-# --- Main: Binance WebSocket -> Kafka ----------------------------------
+# --- Main: Binance WebSocket -> Kafka (RAW DATA ONLY) -----------------
 
 def main():
     if hasattr(sys.stdout, 'reconfigure'):
@@ -153,18 +77,15 @@ def main():
 
     print("=" * 70)
     print("  LIVE PRODUCER -- Binance Real-Time to Kafka Pipeline")
-    print("  Features: Deduplication, Volume Classification, Anomaly Detection")
+    print("  Role: INGESTION ONLY (No business logic)")
     print("=" * 70)
     print(f"  Source   : Binance WebSocket (PUBLIC, NO API KEY)")
     print(f"  Symbols  : {', '.join(s.upper() for s in SYMBOLS)}")
     print(f"  Kafka    : {KAFKA_BOOTSTRAP_SERVERS} -> topic '{KAFKA_TOPIC}'")
     print()
 
-    # Native Pipeline mode info
-    print("[INFO] Native Pipeline Mode enabled.")
-    print("   - No legacy PaySim users.")
-    print("   - Idempotent deduplication via Trade UUID is active.")
-    print("   - Volume thresholds: RETAIL, PROFESSIONAL, INSTITUTIONAL, WHALE.")
+    print("[INFO] Ingestion-Only Mode:")
+    print("   - Raw Binance trade data is forwarded to Kafka as-is.")
 
     # 1. Connect to Kafka
     print(f"\n[CONN] Connecting to Kafka: {KAFKA_BOOTSTRAP_SERVERS}...")
@@ -200,29 +121,37 @@ def main():
             if trade.get("e") != "trade":
                 return
 
-            # Map Binance trade -> Pure Native Crypto Event (no faked users)
-            payload = map_binance_trade_to_event(trade)
+            # ===================================================================
+            # RAW DATA FORWARDING — No transformation, no business logic.
+            # We extract only the original Binance fields and forward them.
+            # Spark will handle: UUID, cleansing, classification, anomaly, etc.
+            # ===================================================================
+            raw_payload = {
+                "trade_id":        trade.get("t"),       # Binance original trade ID
+                "crypto_symbol":   trade.get("s"),       # Symbol (e.g. BTCUSDT)
+                "price":           trade.get("p"),       # Price as STRING from Binance
+                "quantity":        trade.get("q"),       # Quantity as STRING from Binance
+                "trade_time_ms":   trade.get("T"),       # Trade time in epoch milliseconds
+                "is_buyer_maker":  trade.get("m"),       # True = Sell side, False = Buy side
+                "buyer_order_id":  trade.get("b"),       # Buyer order ID
+                "seller_order_id": trade.get("a"),       # Seller order ID
+            }
 
-            # Send to Kafka
-            producer.send(KAFKA_TOPIC, value=payload)
+            # Send raw data to Kafka
+            producer.send(KAFKA_TOPIC, value=raw_payload)
             count += 1
 
-            # Log each trade
-            symbol = payload["crypto_symbol"]
-            price = payload["price"]
-            qty = payload["quantity"]
-            total_usd = payload["amount_usd"]
-            vol_cat = payload["volume_category"]
-            anom_flag = " ANOMALY" if payload["is_anomaly"] else ""
+            # Log each trade (minimal formatting for monitoring)
+            symbol = raw_payload["crypto_symbol"] or "?"
+            price  = raw_payload["price"] or "0"
+            qty    = raw_payload["quantity"] or "0"
 
             print(
                 f"[{datetime.now().strftime('%H:%M:%S')}] "
                 f"{symbol:<9} | "
-                f"Pri: ${price:>9,.1f} | "
-                f"Qty: {qty:>8.4f} | "
-                f"Val: ${total_usd:>10,.2f} | "
-                f"Cls: {vol_cat:<13} | "
-                f"TX: {payload['transaction_id'][:8]}{anom_flag}"
+                f"Pri: {price:>12} | "
+                f"Qty: {qty:>12} | "
+                f"TradeID: {raw_payload['trade_id']}"
             )
 
             # Summary every 100 trades
@@ -245,7 +174,7 @@ def main():
         print(f"   Total trades sent: {count:,}")
 
     def on_open(ws):
-        print("\n[OPEN] Binance WebSocket CONNECTED. Receiving live data...")
+        print("\n[OPEN] Binance WebSocket CONNECTED. Receiving live RAW data...")
         print("-" * 70)
 
     # 4. Run WebSocket (blocking, with auto-reconnect)
@@ -273,7 +202,7 @@ def main():
         print(f"  Errors/Exceptions : {error_count:,}")
         print(f"  Duration          : {elapsed:.0f}s")
         print(f"  Throughput        : {rate:.1f} trades/s")
-        print(f"  Data source       : WSS Binance Public (Idempotent Enabled)")
+        print(f"  Mode              : INGESTION")
         print(f"{'=' * 70}")
 
 
