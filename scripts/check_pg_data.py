@@ -76,6 +76,7 @@ def main():
 
     overview_query = """
         SELECT 'fact_binance_trades' AS table_name, COUNT(*) AS row_count FROM fact_binance_trades
+        UNION ALL SELECT 'fact_pipeline_latency',     COUNT(*) FROM fact_pipeline_latency
         UNION ALL SELECT 'dim_crypto_pair',           COUNT(*) FROM dim_crypto_pair
         UNION ALL SELECT 'dim_volume_category',       COUNT(*) FROM dim_volume_category
         UNION ALL SELECT 'dim_exchange_rate',         COUNT(*) FROM dim_exchange_rate
@@ -313,6 +314,43 @@ def main():
         df_top['transaction_id'] = df_top['transaction_id'].str[:12] + '...'
         df_top['price'] = df_top['price'].apply(lambda x: f"${x:,.4f}" if pd.notnull(x) else "")
         print_df(df_top)
+
+    # =================================================================
+    # 10. PIPELINE LATENCY METRICS
+    # =================================================================
+    header("[10]", "PIPELINE LATENCY METRICS")
+
+    df_lat = fetch("""
+        SELECT 
+            sink_name,
+            COUNT(*) as batch_count,
+            SUM(row_count) as total_rows,
+            ROUND(AVG(latency_ms), 2) as avg_latency_ms,
+            MAX(latency_ms) as max_latency_ms,
+            MIN(latency_ms) as min_latency_ms
+        FROM fact_pipeline_latency
+        GROUP BY sink_name
+        ORDER BY sink_name;
+    """)
+    if not df_lat.empty:
+        df_lat['batch_count'] = df_lat['batch_count'].apply(fmt_int)
+        df_lat['total_rows'] = df_lat['total_rows'].apply(fmt_int)
+        df_lat['avg_latency_ms'] = df_lat['avg_latency_ms'].apply(lambda x: f"{x:,.2f} ms" if pd.notnull(x) else "")
+        df_lat['max_latency_ms'] = df_lat['max_latency_ms'].apply(lambda x: f"{int(x):,} ms" if pd.notnull(x) else "")
+        df_lat['min_latency_ms'] = df_lat['min_latency_ms'].apply(lambda x: f"{int(x):,} ms" if pd.notnull(x) else "")
+        print_df(df_lat)
+        
+        print("\n  10 Most Recent Latency Records:")
+        df_lat_recent = fetch("""
+            SELECT batch_id, sink_name, row_count, latency_ms, recorded_at
+            FROM fact_pipeline_latency
+            ORDER BY recorded_at DESC
+            LIMIT 10;
+        """)
+        if not df_lat_recent.empty:
+            df_lat_recent['row_count'] = df_lat_recent['row_count'].apply(fmt_int)
+            df_lat_recent['latency_ms'] = df_lat_recent['latency_ms'].apply(lambda x: f"{int(x):,} ms" if pd.notnull(x) else "")
+            print_df(df_lat_recent)
 
     # =================================================================
     # FOOTER

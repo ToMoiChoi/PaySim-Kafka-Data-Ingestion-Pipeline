@@ -112,6 +112,14 @@ def main():
                 bigquery.SchemaField("wash_cluster_size", "INT64"),
                 bigquery.SchemaField("buyer_order_id", "INT64"),
                 bigquery.SchemaField("seller_order_id", "INT64"),
+            ],
+            "fact_pipeline_latency": [
+                bigquery.SchemaField("latency_id", "INT64", mode="REQUIRED"),
+                bigquery.SchemaField("batch_id", "INT64"),
+                bigquery.SchemaField("sink_name", "STRING"),
+                bigquery.SchemaField("row_count", "INT64"),
+                bigquery.SchemaField("latency_ms", "INT64"),
+                bigquery.SchemaField("recorded_at", "TIMESTAMP"),
             ]
         }
 

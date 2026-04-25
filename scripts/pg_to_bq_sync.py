@@ -35,7 +35,8 @@ TABLES_TO_SYNC = [
     "dim_exchange_rate",
     "dim_date",
     "dim_time",
-    "fact_binance_trades"
+    "fact_binance_trades",
+    "fact_pipeline_latency"
 ]                                                                                     
 
 def sync_table(table_name, db_url):
@@ -62,6 +63,8 @@ def sync_table(table_name, db_url):
         df["full_date"] = pd.to_datetime(df["full_date"])
     if table_name == "dim_time" and "time_val" in df.columns:
         df["time_val"] = df["time_val"].astype(str)
+    if table_name == "fact_pipeline_latency" and "recorded_at" in df.columns:
+        df["recorded_at"] = pd.to_datetime(df["recorded_at"], utc=True)
 
     print(f"[OK] Loaded {len(df):,} rows. Uploading to BigQuery ({table_name})...")
     
