@@ -29,9 +29,9 @@ PG_PASSWORD = os.getenv("POSTGRES_PASSWORD", "paysim123")
 NUM_ROWS_PER_DAY = 5000
 BATCH_SIZE = 5000
 
-# Khoảng thời gian: 01/02/2026 - 31/03/2026
-START_DATE = datetime(2026, 2, 1)
-END_DATE = datetime(2026, 3, 31)
+# Khoảng thời gian: 01/04/2026 - 24/04/2026
+START_DATE = datetime(2026, 4, 1)
+END_DATE = datetime(2026, 4, 24)
 
 BASE_PRICES = {
     1: 60000.0, # BTC
@@ -43,7 +43,7 @@ BASE_PRICES = {
 
 def generate_and_insert():
     total_days = (END_DATE - START_DATE).days + 1
-    print(f"[MOCK DATA] Bắt đầu sinh {NUM_ROWS_PER_DAY} dòng/ngày cho T2 & T3/2026 ({total_days} ngày)...")
+    print(f"[MOCK DATA] Bắt đầu sinh {NUM_ROWS_PER_DAY} dòng/ngày cho T4/2026 ({total_days} ngày)...")
     
     trade_id_start = int(time.time() * 1000)
     current_date = START_DATE
