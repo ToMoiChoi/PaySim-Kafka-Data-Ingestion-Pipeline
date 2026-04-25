@@ -255,62 +255,17 @@ def process_raw_to_fact(spark: SparkSession, raw_df: DataFrame) -> DataFrame:
     logger.info("[PROCESSING] Step 5: Volume categorization completed (Surrogate Keys 1-4)")
 
     # -----------------------------------------------------------------
-    # Step 6: ANOMALY DETECTION — Multi-Rule Business Logic
-    #
-    # A trade is flagged as anomaly (is_anomaly = True) when it matches
-    # ANY of the following independently-defined business rules:
-    #
-    # Rule 1: WHALE TRADE (Market Impact)
-    #   Condition: amount_usd >= $1,000,000
-    #   Rationale: A single trade worth $1M+ can cause significant
-    #              price slippage and market movement. These events
-    #              require monitoring for market manipulation detection.
-    #   Reference: Whale Alert tracking standard (whalealert.io)
-    #
-    # Rule 2: DUST / WASH TRADE (Manipulation Suspect)
-    #   Condition: amount_usd < $0.01 (less than 1 cent)
-    #   Rationale: Trades with near-zero value serve no legitimate
-    #              economic purpose. Common patterns include:
-    #              - Wash trading (inflating volume artificially)
-    #              - Address poisoning attacks
-    #              - Bot testing / spam transactions
-    #   Reference: Chainalysis 2024 Crypto Crime Report
-    #
-    # Rule 3: ABNORMAL QUANTITY (Per-Symbol Threshold)
-    #   Condition: Single-trade quantity exceeds the symbol's
-    #              99th-percentile threshold:
-    #              - BTCUSDT:  >= 10 BTC   (~$870K at $87K/BTC)
-    #              - ETHUSDT:  >= 100 ETH   (~$330K at $3.3K/ETH)
-    #              - BNBUSDT:  >= 500 BNB   (~$300K at $600/BNB)
-    #              - SOLUSDT:  >= 5000 SOL  (~$750K at $150/SOL)
-    #              - XRPUSDT:  >= 500000 XRP (~$250K at $0.5/XRP)
-    #   Rationale: Unusually large single-order quantities for a
-    #              specific asset indicate potential OTC block trades,
-    #              whale accumulation, or coordinated market activity
-    #              that differs from normal retail/pro flow.
+    # Step 6: ANOMALY DETECTION — Shifted to Micro-Batch
+    # 
+    # Static Anomaly rules have been replaced by Dynamic Statistical
+    # Models (Z-Score, Wash Trade Heuristics, Slippage).
+    # Because PySpark does not allow non-time-based Window functions 
+    # on streaming DFs, the actual advanced calculations are deferred 
+    # and executed inside the `foreachBatch` orchestrator.
+    # Here we just pre-allocate the column to preserve schema integrity.
     # -----------------------------------------------------------------
-
-    # Rule 1: Whale trade (market-moving value)
-    rule_whale = col("amount_usd") >= 1_000_000
-
-    # Rule 2: Dust/wash trade (manipulation suspect)
-    rule_dust = col("amount_usd") < 0.01
-
-    # Rule 3: Abnormal quantity per symbol
-    rule_abnormal_qty = (
-        ((col("crypto_symbol") == "BTCUSDT")  & (col("quantity") >= 10))
-        | ((col("crypto_symbol") == "ETHUSDT")  & (col("quantity") >= 100))
-        | ((col("crypto_symbol") == "BNBUSDT")  & (col("quantity") >= 500))
-        | ((col("crypto_symbol") == "SOLUSDT")  & (col("quantity") >= 5000))
-        | ((col("crypto_symbol") == "XRPUSDT")  & (col("quantity") >= 500000))
-    )
-
-    anomaly_df = categorized_df.withColumn(
-        "is_anomaly",
-        when(rule_whale | rule_dust | rule_abnormal_qty, lit(True))
-        .otherwise(lit(False))
-    )
-    logger.info("[PROCESSING] Step 6: Anomaly detection completed (3 business rules)")
+    anomaly_df = categorized_df.withColumn("is_anomaly", lit(False))
+    logger.info("[PROCESSING] Step 6: Pre-allocation for dynamic Anomaly Detection completed")
 
     # -----------------------------------------------------------------
     # Step 7: STAR SCHEMA KEY GENERATION — All Surrogate Keys
@@ -411,6 +366,7 @@ def write_to_postgres(rows: list, batch_id: int, row_count: int):
         "trade_time",
         "price", "quantity", "amount_usd",
         "is_buyer_maker", "is_anomaly",
+        "z_score", "price_dev_pct", "wash_cluster_size",
         "buyer_order_id", "seller_order_id"
     ]
 
@@ -430,13 +386,17 @@ def write_to_postgres(rows: list, batch_id: int, row_count: int):
                     trade_time,
                     price, quantity, amount_usd,
                     is_buyer_maker, is_anomaly,
+                    z_score, price_dev_pct, wash_cluster_size,
                     buyer_order_id, seller_order_id
                 ) VALUES %s
                 ON CONFLICT (transaction_id) DO UPDATE SET
                     price = EXCLUDED.price,
                     quantity = EXCLUDED.quantity,
                     amount_usd = EXCLUDED.amount_usd,
-                    is_anomaly = EXCLUDED.is_anomaly
+                    is_anomaly = EXCLUDED.is_anomaly,
+                    z_score = EXCLUDED.z_score,
+                    price_dev_pct = EXCLUDED.price_dev_pct,
+                    wash_cluster_size = EXCLUDED.wash_cluster_size
             """
             psycopg2.extras.execute_values(cur, insert_sql, values, page_size=2000)
         conn.commit()
@@ -451,6 +411,19 @@ def write_to_postgres(rows: list, batch_id: int, row_count: int):
         f"[Batch {batch_id}] --> PostgreSQL UPSERT | "
         f"rows={row_count:,} | latency={elapsed}ms"
     )
+
+    # --- Log Latency Metric ---
+    try:
+        lat_conn = pool.getconn()
+        with lat_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO fact_pipeline_latency (batch_id, sink_name, row_count, latency_ms) VALUES (%s, %s, %s, %s)",
+                (batch_id, 'PostgreSQL', row_count, elapsed)
+            )
+        lat_conn.commit()
+        pool.putconn(lat_conn)
+    except Exception as e:
+        logger.warning(f"[Batch {batch_id}] Failed to log PG latency: {e}")
 
 
 # =====================================================================
@@ -485,7 +458,7 @@ def _bq_async_upload(rows_dicts: list, batch_id: int, row_count: int):
         pdf = _pd.DataFrame(rows_dicts)
 
         # Float matching BQ Schema
-        float_cols = ["price", "quantity", "amount_usd"]
+        float_cols = ["price", "quantity", "amount_usd", "z_score", "price_dev_pct"]
         for c in float_cols:
             if c in pdf.columns:
                 pdf[c] = pdf[c].astype(float)
@@ -517,6 +490,20 @@ def _bq_async_upload(rows_dicts: list, batch_id: int, row_count: int):
 
         elapsed = int((time.time() - t0) * 1000)
         logger.info(f"[Batch {batch_id}] --> BigQuery ASYNC | rows={row_count:,} | latency={elapsed}ms")
+
+        # --- Log Latency Metric to PostgreSQL ---
+        try:
+            pool = _get_pg_pool()
+            lat_conn = pool.getconn()
+            with lat_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO fact_pipeline_latency (batch_id, sink_name, row_count, latency_ms) VALUES (%s, %s, %s, %s)",
+                    (batch_id, 'BigQuery', row_count, elapsed)
+                )
+            lat_conn.commit()
+            pool.putconn(lat_conn)
+        except Exception as e:
+            logger.warning(f"[Batch {batch_id}] Failed to log BQ latency: {e}")
 
     except Exception as e:
         # ===============================================================
@@ -561,7 +548,47 @@ def dual_sink_batch(batch_df: DataFrame, batch_id: int):
     global LAST_BQ_UPLOAD_TIME
     t_start = time.time()
 
-    rows = batch_df.collect()
+    # --- ADVANCED DYNAMIC ANOMALY DETECTION ---
+    # Because batch_df is a static DataFrame, we can use non-time-based Window functions safely.
+    try:
+        from pyspark.sql.window import Window
+        from pyspark.sql.functions import avg, stddev, count, abs as spark_abs, coalesce, col, when, lit
+        
+        w_symbol = Window.partitionBy("crypto_pair_key")
+        # Wash trade cluster logic ignores buyer/maker for simplicity of volume detection
+        w_wash = Window.partitionBy("crypto_pair_key", "trade_time")
+
+        enriched_df = (
+            batch_df
+            # 1. Z-Score Deviation (Volume Outlier)
+            .withColumn("batch_mean_usd", avg("amount_usd").over(w_symbol))
+            .withColumn("batch_std_usd", coalesce(stddev("amount_usd").over(w_symbol), lit(1.0)))
+            .withColumn("batch_std_usd", when(col("batch_std_usd") == 0, lit(1.0)).otherwise(col("batch_std_usd")))
+            .withColumn("z_score", (col("amount_usd") - col("batch_mean_usd")) / col("batch_std_usd"))
+            
+            # 2. Price Slippage / Market Impact (VWAP deviation)
+            .withColumn("batch_avg_price", avg("price").over(w_symbol))
+            .withColumn("price_dev_pct", spark_abs(col("price") - col("batch_avg_price")) / col("batch_avg_price"))
+            
+            # 3. Wash Trade Clustering (High-frequency sameness)
+            .withColumn("wash_cluster_size", count("trade_id").over(w_wash))
+            
+            # Evaluate Business Rules
+            .withColumn("is_anomaly", when(
+                (col("z_score") > 3.0) |                                                      # Rule 1: Z-Score Outlier
+                (col("wash_cluster_size") >= 4) |                                             # Rule 2: Wash Trade Bot
+                ((col("price_dev_pct") > 0.01) & (col("amount_usd") > col("batch_mean_usd"))),  # Rule 3: Price Slippage
+                lit(True)
+            ).otherwise(lit(False)))
+            
+            # Clean up memory (keep anomaly metrics for DB storage)
+            .drop("batch_mean_usd", "batch_std_usd", "batch_avg_price")
+        )
+        rows = enriched_df.collect()
+    except Exception as e:
+        logger.error(f"[Batch {batch_id}] [ERROR] Dynamic anomaly detection failed, falling back: {e}")
+        rows = batch_df.collect()
+
     row_count = len(rows)
 
     if row_count == 0:
@@ -617,7 +644,6 @@ def main():
 
     print("=" * 65)
     print("  SPARK PROCESSING ENGINE — Binance Crypto Streaming")
-    print("  Role: CORE DATA PROCESSING (Cleansing → Storage)")
     print("=" * 65)
     print(f"  Processing Pipeline:")
     print(f"    1. Type Casting       (string → numeric)")
@@ -625,7 +651,7 @@ def main():
     print(f"    3. Deduplication      (SHA-256 UUID + watermark)")
     print(f"    4. Transformation     (calculate amount_usd)")
     print(f"    5. Categorization     (RETAIL/PRO/INSTITUTIONAL/WHALE)")
-    print(f"    6. Anomaly Detection  (flag whale trades)")
+    print(f"    6. Anomaly Detection  (Z-Score, Wash Trade, Slippage)")
     print(f"    7. Star Schema Keys   (date_key, time_key)")
     print(f"  Storage:")
     print(f"    → PostgreSQL (primary, real-time UPSERT)")
@@ -668,7 +694,7 @@ def main():
         .outputMode("append")
         .foreachBatch(dual_sink_batch)
         .trigger(processingTime=TRIGGER_INTERVAL)
-        .option("checkpointLocation", "/tmp/spark_checkpoint_binance_v6")
+        .option("checkpointLocation", "/tmp/spark_checkpoint_binance_v7")
         .start()
     )
 

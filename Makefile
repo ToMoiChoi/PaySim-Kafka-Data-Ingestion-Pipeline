@@ -84,7 +84,7 @@ start-kafka:
 	@echo "$(GREEN)Starting Kafka + Zookeeper...$(RESET)"
 	docker-compose up -d zookeeper kafka
 	@echo "$(YELLOW)Waiting 10s for Kafka to be ready...$(RESET)"
-	sleep 10
+	python -c "import time; time.sleep(10)"
 	@echo "$(GREEN)Kafka is up.$(RESET)"
 
 stop-kafka:

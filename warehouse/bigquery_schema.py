@@ -95,7 +95,7 @@ def main():
             ],
             # Fact table: All FKs are INTEGER surrogate keys
             "fact_binance_trades": [
-                bigquery.SchemaField("transaction_id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("transaction_id", "STRING"),
                 bigquery.SchemaField("trade_id", "INT64"),
                 bigquery.SchemaField("date_key", "INT64"),
                 bigquery.SchemaField("time_key", "INT64"),
@@ -107,6 +107,9 @@ def main():
                 bigquery.SchemaField("amount_usd", "FLOAT64"),
                 bigquery.SchemaField("is_buyer_maker", "BOOLEAN"),
                 bigquery.SchemaField("is_anomaly", "BOOLEAN"),
+                bigquery.SchemaField("z_score", "FLOAT64"),
+                bigquery.SchemaField("price_dev_pct", "FLOAT64"),
+                bigquery.SchemaField("wash_cluster_size", "INT64"),
                 bigquery.SchemaField("buyer_order_id", "INT64"),
                 bigquery.SchemaField("seller_order_id", "INT64"),
             ]

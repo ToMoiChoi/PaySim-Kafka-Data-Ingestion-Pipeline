@@ -34,6 +34,7 @@ DATABASE_URL = f"postgresql+psycopg2://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_POR
 
 # --- Drop old tables in correct order (respect FK constraints) ---
 DROP_LEGACY_STATEMENTS = [
+    "DROP TABLE IF EXISTS fact_pipeline_latency CASCADE;",
     "DROP TABLE IF EXISTS fact_binance_trades CASCADE;",
     "DROP TABLE IF EXISTS fact_transactions CASCADE;",
     "DROP TABLE IF EXISTS dim_exchange_rate CASCADE;",
@@ -125,12 +126,27 @@ DDL_STATEMENTS = [
         amount_usd            NUMERIC(38, 9),
         is_buyer_maker        BOOLEAN,
         is_anomaly            BOOLEAN,
+        z_score               NUMERIC(10, 4),
+        price_dev_pct         NUMERIC(10, 4),
+        wash_cluster_size     INTEGER,
         buyer_order_id        BIGINT,
         seller_order_id       BIGINT,
         CONSTRAINT fk_trade_date     FOREIGN KEY (date_key)             REFERENCES dim_date(date_key),
         CONSTRAINT fk_trade_time     FOREIGN KEY (time_key)             REFERENCES dim_time(time_key),
         CONSTRAINT fk_trade_pair     FOREIGN KEY (crypto_pair_key)      REFERENCES dim_crypto_pair(crypto_pair_key),
         CONSTRAINT fk_trade_category FOREIGN KEY (volume_category_key)  REFERENCES dim_volume_category(volume_category_key)
+    );
+    """,
+
+    # -- fact_pipeline_latency --------------------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS fact_pipeline_latency (
+        latency_id       SERIAL PRIMARY KEY,
+        batch_id         BIGINT,
+        sink_name        VARCHAR(50),
+        row_count        INTEGER,
+        latency_ms       INTEGER,
+        recorded_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """,
 

@@ -8,3 +8,4 @@ credentials/
 bq_backup/
 .ivy2/
 .claude/
+dlq_bq_failed/
