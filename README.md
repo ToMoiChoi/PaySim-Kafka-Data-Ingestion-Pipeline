@@ -274,17 +274,17 @@ make reconcile      # Compare Kafka vs BigQuery row counts
 
 Dự án tích hợp một luồng đánh giá tự động (Review Sub Agent) để đảm bảo chất lượng mã nguồn và dữ liệu luôn đạt chuẩn doanh nghiệp trước khi tích hợp. Quy trình đánh giá bao gồm 3 bước nghiêm ngặt:
 
-1. **🔍 Phát hiện lỗi (Error Detection):**
+1. **Phát hiện lỗi (Error Detection):**
    - Kiểm tra vi phạm chuẩn Kimball (Ví dụ: dùng VARCHAR làm khóa ngoại ở bảng Fact).
    - Đảm bảo Data Pipeline tuân thủ việc băm mã `transaction_id` bằng SHA-256.
    - Bắt các lỗi cú pháp Python, nguy cơ rò rỉ bộ nhớ hoặc vòng lặp vô tận.
 
-2. **⚖️ Kiểm định chất lượng (Quality Verification):**
+2. **Kiểm định chất lượng (Quality Verification):**
    - Kiểm tra cấu hình Watermark (15 phút) trong Spark để xử lý dữ liệu trễ.
    - Xác minh cơ chế UPSERT (`ON CONFLICT`) của PostgreSQL đã được triển khai để chống trùng lặp.
    - Đảm bảo BigQuery Schema khớp 100% với cấu trúc PostgreSQL.
 
-3. **💡 Tối ưu cuối cùng (Final Polished Output):**
+3. **Tối ưu cuối cùng (Final Polished Output):**
    - Refactor mã nguồn để loại bỏ code thừa, đảm bảo tính tối ưu và đẹp mắt.
    - Cung cấp docstring và comment rõ ràng, giải thích tường minh để dễ dàng đưa vào Báo cáo Khóa luận.
    - Chỉ xuất ra phiên bản "Sẵn sàng bàn giao" (Ready for Delivery) khi đạt chất lượng tuyệt đối.

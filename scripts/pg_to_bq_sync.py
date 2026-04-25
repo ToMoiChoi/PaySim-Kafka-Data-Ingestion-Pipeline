@@ -54,10 +54,20 @@ def sync_table(table_name, db_url):
             df['price'] = df['price'].astype(float)
             df['quantity'] = df['quantity'].astype(float)
             df['amount_usd'] = df['amount_usd'].astype(float)
-            df['trade_time'] = pd.to_datetime(df['trade_time'], utc=True)
-        except Exception:
-            pass
+            if 'z_score' in df.columns: df['z_score'] = df['z_score'].astype(float)
+            if 'price_dev_pct' in df.columns: df['price_dev_pct'] = df['price_dev_pct'].astype(float)
             
+            # Enforce INT64 for BigQuery (use pandas Nullable Integer)
+            int_cols = ["trade_id", "date_key", "time_key", "crypto_pair_key", 
+                        "volume_category_key", "wash_cluster_size", 
+                        "buyer_order_id", "seller_order_id"]
+            for c in int_cols:
+                if c in df.columns:
+                    df[c] = df[c].astype("Int64")
+                    
+            df['trade_time'] = pd.to_datetime(df['trade_time'], utc=True)
+        except Exception as e:
+            print(f"[WARN] Failed to convert types in {table_name}: {e}")
     # Fix date/time types for BigQuery compatibility
     if table_name == "dim_date" and "full_date" in df.columns:
         df["full_date"] = pd.to_datetime(df["full_date"])
