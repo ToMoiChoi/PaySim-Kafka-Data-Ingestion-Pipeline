@@ -88,15 +88,25 @@ def sync_table(table_name, db_url):
     except Exception as e:
         print(f"[ERROR] Failed to upload table {table_name}: {e}")
 
-def sync_all():
-    print(f"[START] SYNCHRONISING FULL DATA WAREHOUSE TO BIGQUERY")
+def sync_all(target_table=None):
+    if target_table:
+        print(f"[START] SYNCHRONISING {target_table.upper()} TO BIGQUERY")
+    else:
+        print(f"[START] SYNCHRONISING FULL DATA WAREHOUSE TO BIGQUERY")
     print(f"===========================================================")
     DATABASE_URL = f"postgresql+psycopg2://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
     
-    for table in TABLES_TO_SYNC:
+    tables = [target_table] if target_table else TABLES_TO_SYNC
+    
+    for table in tables:
         sync_table(table, DATABASE_URL)
         
     print("\n[DONE] All tables synchronised successfully. BigQuery warehouse is READY FOR POWER BI.")
 
 if __name__ == "__main__":
-    sync_all()
+    import argparse
+    parser = argparse.ArgumentParser(description="Sync PostgreSQL to BigQuery")
+    parser.add_argument("--table", type=str, help="Specific table to sync (e.g. fact_binance_trades)")
+    args = parser.parse_args()
+    
+    sync_all(args.table)
