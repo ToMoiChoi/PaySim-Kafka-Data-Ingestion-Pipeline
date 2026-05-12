@@ -102,7 +102,8 @@ DDL_STATEMENTS = [
     # -- dim_exchange_rate ------------------------------------------------
     """
     CREATE TABLE IF NOT EXISTS dim_exchange_rate (
-        date_key        BIGINT PRIMARY KEY,
+        exchange_rate_key SERIAL PRIMARY KEY,
+        date_key        BIGINT,
         currency_code   VARCHAR(10),
         vnd_rate        NUMERIC(15, 2),
         CONSTRAINT fk_fx_date FOREIGN KEY (date_key) REFERENCES dim_date(date_key)

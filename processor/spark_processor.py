@@ -191,15 +191,15 @@ def process_raw_to_fact(spark: SparkSession, raw_df: DataFrame) -> DataFrame:
     # Solution: TWO-LAYER DEDUPLICATION
     #
     # LAYER 1 (Real-time, in Spark):
-    #   - Generate deterministic transaction_id from trade_id using
-    #     SHA-256 hash → same trade always produces same ID.
-    #   - Watermark window = 15 minutes (covers most reconnect scenarios).
+    #   - Generate deterministic transaction_id from symbol and trade_id
+    #     → (e.g. BTCUSDT_12345).
+    #   - Watermark window = 30 seconds (covers most reconnect scenarios).
     #   - dropDuplicates on transaction_id within the watermark window.
     #   - Handles ~95% of duplicates in real-time at the streaming level.
     #
     # LAYER 2 (Storage-level, guaranteed):
     #   - PostgreSQL: INSERT ... ON CONFLICT (transaction_id) DO UPDATE
-    #     → Even if a duplicate passes Layer 1 (arrives after 15 min),
+    #     → Even if a duplicate passes Layer 1 (arrives after 30 seconds),
     #       PostgreSQL's UNIQUE constraint catches it at write time.
     #   - BigQuery: Uses Load Job with WRITE_APPEND. Periodic dedup can
     #     be done via scheduled query if needed.
@@ -208,21 +208,21 @@ def process_raw_to_fact(spark: SparkSession, raw_df: DataFrame) -> DataFrame:
     # data warehouse regardless of how long the server is down.
     # -----------------------------------------------------------------
 
-    # Generate deterministic transaction_id (same trade_id → same hash)
+    # Generate deterministic transaction_id (crypto_symbol + "_" + trade_id)
     dedup_df = (
         clean_df
         .withColumn(
             "transaction_id",
-            sha2(concat_ws(".", lit("binance"), lit("trade"), col("trade_id").cast("string")), 256)
+            concat_ws("_", col("crypto_symbol"), col("trade_id").cast("string"))
         )
-        # Layer 1: Spark stateful dedup with 15-minute watermark
-        # 15 minutes covers typical WebSocket reconnect delays.
-        # For delays exceeding 15 minutes, Layer 2 (PostgreSQL UPSERT
+        # Layer 1: Spark stateful dedup with 30-second watermark
+        # 30 seconds covers typical WebSocket reconnect delays.
+        # For delays exceeding 30 seconds, Layer 2 (PostgreSQL UPSERT
         # ON CONFLICT) guarantees no duplicates reach the warehouse.
-        .withWatermark("trade_time", "15 minutes")
+        .withWatermark("trade_time", "30 seconds")
         .dropDuplicates(["transaction_id"])
     )
-    logger.info("[PROCESSING] Step 3: Deduplication Layer 1 completed (SHA-256 + 15min watermark)")
+    logger.info("[PROCESSING] Step 3: Deduplication Layer 1 completed (Symbol_TradeID + 30sec watermark)")
 
     # -----------------------------------------------------------------
     # Step 4: TRANSFORMATION — Derive computed columns
@@ -648,7 +648,7 @@ def main():
     print(f"  Processing Pipeline:")
     print(f"    1. Type Casting       (string → numeric)")
     print(f"    2. Data Cleansing     (filter invalid records)")
-    print(f"    3. Deduplication      (SHA-256 UUID + watermark)")
+    print(f"    3. Deduplication      (Symbol_TradeID + watermark)")
     print(f"    4. Transformation     (calculate amount_usd)")
     print(f"    5. Categorization     (RETAIL/PRO/INSTITUTIONAL/WHALE)")
     print(f"    6. Anomaly Detection  (Z-Score, Wash Trade, Slippage)")

@@ -89,7 +89,8 @@ def main():
                 bigquery.SchemaField("pair_name", "STRING"),
             ],
             "dim_exchange_rate": [
-                bigquery.SchemaField("date_key", "INT64", mode="REQUIRED"),
+                bigquery.SchemaField("exchange_rate_key", "INT64", mode="REQUIRED"),
+                bigquery.SchemaField("date_key", "INT64"),
                 bigquery.SchemaField("currency_code", "STRING"),
                 bigquery.SchemaField("vnd_rate", "FLOAT64"),
             ],
