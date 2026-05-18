@@ -48,7 +48,9 @@ logging.basicConfig(
 logger = logging.getLogger("SparkProcessingEngine")
 
 # --- Config ------------------------------------------------------------
-load_dotenv()
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ENV_PATH = os.path.join(PROJECT_ROOT, ".env")
+load_dotenv(ENV_PATH)
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 KAFKA_TOPIC             = os.getenv("KAFKA_TOPIC", "payment_events_v3")
@@ -65,6 +67,11 @@ BQ_PROJECT_ID = os.getenv("BQ_PROJECT_ID", "")
 BQ_DATASET    = os.getenv("BQ_DATASET", "paysim_dw")
 BQ_TABLE_FACT = "fact_binance_trades"
 GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+
+if GOOGLE_APPLICATION_CREDENTIALS and not os.path.isabs(GOOGLE_APPLICATION_CREDENTIALS):
+    GOOGLE_APPLICATION_CREDENTIALS = os.path.join(PROJECT_ROOT, GOOGLE_APPLICATION_CREDENTIALS)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GOOGLE_APPLICATION_CREDENTIALS
+
 BQ_PARQUET_DIR = os.getenv("BQ_PARQUET_BACKUP_DIR", "/tmp/bq_backup")
 
 # Dead-Letter Queue directory for failed BQ uploads
@@ -94,9 +101,12 @@ raw_kafka_schema = StructType([
 # =====================================================================
 def create_spark_session() -> SparkSession:
     """Create Spark session with Windows compatibility fixes."""
-    os.environ["HADOOP_HOME"] = r"C:\hadoop"
+    os.environ["HADOOP_HOME"] = r"C:\Users\Admin\.hadoop"
+    if "JAVA_HOME" not in os.environ or "jdk-17" not in os.environ["JAVA_HOME"]:
+        os.environ["JAVA_HOME"] = r"C:\Users\Admin\.java\jdk-17.0.19+10"
+        
     if sys.platform.startswith('win'):
-        os.environ['PATH'] = os.environ['PATH'] + ';' + r'C:\hadoop\bin'
+        os.environ['PATH'] = os.environ.get('PATH', '') + ';' + r'C:\Users\Admin\.hadoop\bin' + ';' + r'C:\Users\Admin\.java\jdk-17.0.19+10\bin'
         os.environ["SPARK_LOCAL_IP"] = "127.0.0.1"
         os.environ["SPARK_LOCAL_HOSTNAME"] = "127.0.0.1"
 

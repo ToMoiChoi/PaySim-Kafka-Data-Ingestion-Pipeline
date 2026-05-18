@@ -15,6 +15,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 load_dotenv()
 
+# Resolve absolute path for Google Cloud credentials
+creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+if creds_path and not os.path.isabs(creds_path):
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    abs_creds_path = os.path.join(project_root, creds_path)
+    if os.path.exists(abs_creds_path):
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = abs_creds_path
+
 BQ_PROJECT_ID = os.getenv("BQ_PROJECT_ID")
 BQ_DATASET    = os.getenv("BQ_DATASET", "paysim_dw")
 
@@ -30,13 +38,13 @@ if not BQ_PROJECT_ID:
     sys.exit(1)
 
 TABLES_TO_SYNC = [
-    "dim_volume_category",
-    "dim_crypto_pair",
-    "dim_exchange_rate",
-    "dim_date",
+    # "dim_volume_category",
+    # "dim_crypto_pair",
+    # "dim_exchange_rate",
+    # "dim_date",
     "dim_time",
-    "fact_binance_trades",
-    "fact_pipeline_latency"
+    # "fact_binance_trades",
+    # "fact_pipeline_latency"
 ]                                                                                     
 
 def sync_table(table_name, db_url):
