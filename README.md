@@ -1,23 +1,49 @@
 # Real-time Crypto Data Pipeline: Binance Trade Analysis & Anomaly Detection
 
-A real-time streaming data pipeline for cryptocurrency market data, built on **Kimball Star Schema** methodology. The system ingests live trade data from Binance WebSocket, processes it through Apache Spark Structured Streaming with a 7-step transformation pipeline, and stores results in a dual-sink architecture (PostgreSQL + Google BigQuery).
+A real-time streaming data pipeline for cryptocurrency market data, built on **Kimball Star Schema** methodology. The system ingests live trade data from Binance WebSocket, processes it through Apache Spark Structured Streaming with a 7-step transformation pipeline, applies dynamic statistical anomaly detection, and stores results in a dual-sink architecture (PostgreSQL + Google BigQuery).
 
 ---
 
-## Architecture
+## 📊 Dashboards & Analytics
+
+*(PowerBI Visualizations powered by BigQuery Data Warehouse)*
+
+### 1. Thanh Khoản & Dòng Tiền (Liquidity & Cash Flow)
+
+![Thanh khoản & dòng tiền](img/Thanh%20kho%E1%BA%A3n%20&%20d%C3%B2ng%20ti%E1%BB%81n.png)
+
+### 2. Hành Vi Cá Mập (Whale Behavior)
+
+![Hành vi Cá Mập](img/H%C3%A0nh%20vi%20C%C3%A1%20M%E1%BA%ADp%20.png)
+
+### 3. Cảnh Báo Rủi Ro & Bất Thường (Risk & Anomaly Warnings)
+
+![Cảnh báo rủi ro & Bất thường](img/C%E1%BA%A3nh%20b%C3%A1o%20r%E1%BB%A7i%20ro%20&%20B%E1%BA%A5t%20th%C6%B0%E1%BB%9Dng.png)
+
+### 4. Phát Hiện BOT Thao Túng (Wash Trade / Bot Manipulation)
+
+![Phát hiện BOT thao túng](img/Ph%C3%A1t%20hi%E1%BB%87n%20BOT%20thao%20t%C3%BAng.png)
+
+### 5. Hiệu Năng Pipeline (Pipeline Performance & Latency)
+
+![Hiệu năng pipeline](img/Hi%E1%BB%87u%20n%C4%83ng%20pipeline.png)
+
+---
+
+## 🏗 Architecture
 
 ```mermaid
 graph TD
     A["🔗 Binance WebSocket<br/>(5 pairs, public, no API key)"] -->|Raw JSON| B["📡 Kafka Producer<br/>(live_producer.py)"]
-    B -->|"Topic: payment_events_v3<br/>(gzip compressed)"| C["⚡ Spark Structured Streaming<br/>(spark_processor.py)"]
+    B -->|"Topic: payment_events_v3<br/>(lz4 compressed)"| C["⚡ Spark Structured Streaming<br/>(spark_processor.py)"]
 
     subgraph SPARK ["Stage 2: Data Processing (7 Steps)"]
         direction TB
         S1["1. Type Casting<br/>string → numeric"] --> S2["2. Data Cleansing<br/>filter invalid records"]
-        S2 --> S3["3. Deduplication<br/>SHA-256 + 15min watermark"]
+        S2 --> S3["3. Deduplication<br/>Concat Key + 30s watermark"]
         S3 --> S4["4. Transformation<br/>price × quantity = amount_usd"]
         S4 --> S5["5. Volume Classification<br/>SK: 1=RETAIL, 2=PRO, 3=INST, 4=WHALE"]
-        S5 --> S6["6. Anomaly Detection<br/>3 business rules"]
+        S5 --> S6["6. Dynamic Anomaly Detection<br/>Z-Score, Slippage, Wash Trade"]
         S6 --> S7["7. Star Schema Keys<br/>date_key, time_key, crypto_pair_key"]
     end
 
@@ -28,162 +54,103 @@ graph TD
     F --> G["📊 Power BI Dashboard"]
 ```
 
-### Pipeline Components
+---
 
-| Layer | Component | Role |
-|-------|-----------|------|
-| **Ingestion** | `live_producer.py` | Binance WebSocket → Kafka (raw data only, no business logic) |
-| **Message Broker** | Apache Kafka (Confluent 7.5) | Buffer layer with gzip compression |
-| **Processing** | Spark Structured Streaming | 7-step transformation pipeline (the core engine) |
-| **Primary Sink** | PostgreSQL 15 | Real-time UPSERT via `ON CONFLICT` |
-| **Backup Sink** | Google BigQuery | Async Parquet Load Job with DLQ fault tolerance |
-| **Visualization** | Power BI | Connects to BigQuery for dashboards |
+## ⚙ Data Processing Pipeline (7 Steps)
+
+All processing is performed in **Spark Structured Streaming** (`spark_processor.py`).
+
+| Step | Operation | Description |
+|------|-----------|-------------|
+| 1 | Type Casting | Convert Binance string fields (price, quantity) to numeric types. |
+| 2 | Data Cleansing | Filter invalid records (price ≤ 0, quantity ≤ 0, nulls). |
+| 3 | Deduplication | Concat crypto_symbol_trade_id + 30-second watermark + dropDuplicates. |
+| 4 | Transformation | Calculate amount_usd = price × quantity. |
+| 5 | Volume Classification | Map amount_usd → Surrogate Key (1=RETAIL, 2=PRO, 3=INSTITUTIONAL, 4=WHALE). |
+| 6 | Anomaly Detection | Dynamic evaluation via foreachBatch using Window functions (Z-score, Wash trade clustering, Slippage). |
+| 7 | Star Schema Keys | Generate date_key (yyyyMMdd), time_key (HHmm), and lookup crypto_pair_key. |
+
+### Two-Layer Deduplication Strategy
+
+1. **Layer 1 (Real-time in Spark):** String concatenation (`crypto_symbol` + `_` + `trade_id`) + 30-second watermark window to handle immediate WebSocket reconnect replays.
+2. **Layer 2 (Storage-level):** PostgreSQL `INSERT ... ON CONFLICT (transaction_id) DO UPDATE` guarantees 100% deduplication even if duplicates arrive past the 30-second window.
+
+### Dynamic Anomaly Detection Rules (foreachBatch)
+
+Instead of static thresholds, the pipeline uses statistical Window functions per micro-batch:
+
+- **Z-Score Outlier:** `z_score > 3.0` (Trade amount exceeds 3 standard deviations from the micro-batch mean for that symbol).
+- **Wash Trade Bot:** `wash_cluster_size >= 4` (High-frequency sameness: 4+ trades occurring at the exact same millisecond timestamp).
+- **Price Slippage:** `price_dev_pct > 0.01 & amount_usd > batch_mean` (Price deviates more than 1% from the batch average while having above-average volume).
 
 ---
 
-## Kimball Star Schema
+## 🗄 Kimball Star Schema
 
 The data warehouse follows **Kimball's Dimensional Modeling** methodology with **integer surrogate keys** for all dimension tables.
-
-### Schema Diagram
 
 ```mermaid
 erDiagram
     dim_date {
         BIGINT date_key PK "Smart Key: yyyyMMdd"
         DATE full_date
-        INT day_of_week
-        BOOLEAN is_weekend
-        INT month
-        INT quarter
-        INT year
     }
-
     dim_time {
         BIGINT time_key PK "Smart Key: HHmm"
-        INT hour
-        INT minute
         VARCHAR time_of_day
-        BOOLEAN is_business_hour
     }
-
     dim_crypto_pair {
         INT crypto_pair_key PK "Surrogate Key 1-5"
-        VARCHAR crypto_symbol "Natural Key (UNIQUE)"
-        VARCHAR base_asset
-        VARCHAR quote_asset
-        VARCHAR pair_name
+        VARCHAR crypto_symbol "Natural Key"
     }
-
     dim_volume_category {
         INT volume_category_key PK "Surrogate Key 1-4"
-        VARCHAR volume_category "Natural Key (UNIQUE)"
-        VARCHAR description
-        NUMERIC min_usd
-        NUMERIC max_usd
+        VARCHAR volume_category "Natural Key"
     }
-
-    dim_exchange_rate {
-        BIGINT date_key PK "FK → dim_date"
-        VARCHAR currency_code
-        NUMERIC vnd_rate
-    }
-
     fact_binance_trades {
-        VARCHAR transaction_id PK "Degenerate Dimension (SHA-256)"
+        VARCHAR transaction_id PK "Degenerate Dimension"
         BIGINT trade_id
-        BIGINT date_key FK "→ dim_date"
-        BIGINT time_key FK "→ dim_time"
-        INT crypto_pair_key FK "→ dim_crypto_pair"
-        INT volume_category_key FK "→ dim_volume_category"
-        TIMESTAMP trade_time
+        BIGINT date_key FK
+        BIGINT time_key FK
+        INT crypto_pair_key FK
+        INT volume_category_key FK
         NUMERIC price
         NUMERIC quantity
         NUMERIC amount_usd
-        BOOLEAN is_buyer_maker
         BOOLEAN is_anomaly
-        BIGINT buyer_order_id
-        BIGINT seller_order_id
+        NUMERIC z_score
+        NUMERIC price_dev_pct
+        INT wash_cluster_size
     }
 
     dim_date ||--o{ fact_binance_trades : "date_key"
     dim_time ||--o{ fact_binance_trades : "time_key"
     dim_crypto_pair ||--o{ fact_binance_trades : "crypto_pair_key"
     dim_volume_category ||--o{ fact_binance_trades : "volume_category_key"
-    dim_date ||--|| dim_exchange_rate : "date_key"
 ```
 
-### Kimball Compliance
-
-| Principle | Implementation |
-|-----------|---------------|
-| **Surrogate Keys** | `dim_crypto_pair` PK = `crypto_pair_key INTEGER` (1-5), `dim_volume_category` PK = `volume_category_key INTEGER` (1-4) |
-| **Smart Keys** | `dim_date` PK = `date_key BIGINT` (yyyyMMdd), `dim_time` PK = `time_key BIGINT` (HHmm) |
-| **No VARCHAR FK in Fact** | Fact table references dimensions via INTEGER keys only. Natural keys (`crypto_symbol`, `volume_category`) stored only as attributes in dimension tables |
-| **Degenerate Dimension** | `transaction_id` (SHA-256 hash) lives in Fact table directly — no separate dimension table needed |
-
-### Surrogate Key Mappings
-
-| dim_crypto_pair | dim_volume_category |
-|-----------------|---------------------|
-| 1 = BTCUSDT | 1 = RETAIL (< $10K) |
-| 2 = ETHUSDT | 2 = PROFESSIONAL ($10K–$100K) |
-| 3 = BNBUSDT | 3 = INSTITUTIONAL ($100K–$1M) |
-| 4 = SOLUSDT | 4 = WHALE (≥ $1M) |
-| 5 = XRPUSDT | |
-
 ---
 
-## Data Processing Pipeline (7 Steps)
-
-All processing is performed in **Spark Structured Streaming** (`spark_processor.py`):
-
-| Step | Operation | Description |
-|------|-----------|-------------|
-| 1 | **Type Casting** | Convert Binance string fields (`price`, `quantity`) to numeric types |
-| 2 | **Data Cleansing** | Filter records with `price ≤ 0`, `quantity ≤ 0`, nulls |
-| 3 | **Deduplication** | SHA-256 deterministic `transaction_id` + 15-minute watermark + `dropDuplicates` |
-| 4 | **Transformation** | Calculate `amount_usd = price × quantity` |
-| 5 | **Volume Classification** | Map `amount_usd` → surrogate key (1=RETAIL, 2=PRO, 3=INSTITUTIONAL, 4=WHALE) |
-| 6 | **Anomaly Detection** | Flag trades matching any of 3 rules: whale trade (≥$1M), dust trade (<$0.01), abnormal quantity per symbol |
-| 7 | **Star Schema Keys** | Generate `date_key` (yyyyMMdd), `time_key` (HHmm), lookup `crypto_pair_key` (1-5) |
-
-### Two-Layer Deduplication Strategy
-
-| Layer | Where | Mechanism | Coverage |
-|-------|-------|-----------|----------|
-| **Layer 1** | Spark (real-time) | SHA-256 hash of `trade_id` + 15-minute watermark + `dropDuplicates` | ~95% of duplicates |
-| **Layer 2** | PostgreSQL (storage) | `INSERT ... ON CONFLICT (transaction_id) DO UPDATE` | 100% guaranteed — catches any late arrivals beyond 15 minutes |
-
-### Anomaly Detection Rules
-
-| Rule | Condition | Rationale |
-|------|-----------|-----------|
-| **Whale Trade** | `amount_usd ≥ $1,000,000` | Market-moving orders (Whale Alert standard) |
-| **Dust/Wash Trade** | `amount_usd < $0.01` | Suspected wash trading or address poisoning |
-| **Abnormal Quantity** | Per-symbol 99th percentile threshold (e.g., ≥10 BTC, ≥100 ETH, ≥500 BNB, ≥5000 SOL, ≥500K XRP) | OTC block trades or coordinated market activity |
-
----
-
-## Dual-Sink Storage with Fault Tolerance
+## 🔄 Dual-Sink Storage with Fault Tolerance
 
 | Feature | PostgreSQL (Primary) | BigQuery (Backup) |
 |---------|---------------------|-------------------|
-| **Mode** | Synchronous | Asynchronous (buffered) |
-| **Write Method** | `UPSERT` via psycopg2 `execute_values` | Parquet Load Job via `google-cloud-bigquery` |
-| **Dedup** | `ON CONFLICT (transaction_id) DO UPDATE` | `WRITE_APPEND` (periodic dedup if needed) |
-| **Failure Handling** | Transaction rollback | **DLQ (Dead-Letter Queue)**: failed Parquet files moved to `dlq_bq_failed/` for manual retry |
-| **Buffer Strategy** | Immediate per micro-batch | Flush every 10 seconds OR 5,000 rows |
+| Mode | Synchronous | Asynchronous (buffered) |
+| Write Method | UPSERT via psycopg2 execute_values | Parquet Load Job via google-cloud-bigquery |
+| Dedup | ON CONFLICT (transaction_id) DO UPDATE | WRITE_APPEND (periodic dedup if needed) |
+| Failure Handling | Transaction rollback | DLQ (Dead-Letter Queue): failed Parquet files moved to dlq_bq_failed/ for manual retry |
+| Buffer Strategy | Immediate per micro-batch | Flush every 10 seconds OR 5,000 rows |
+| Latency Tracking | Logs to fact_pipeline_latency | Included in DLQ system |
 
 ---
 
-## How to Run
+## 🚀 How to Run
 
 ### Prerequisites
 
 - Python 3.10+
-- Docker Desktop running
-- (Optional) Google Cloud service account JSON for BigQuery
+- Docker Desktop running (for PostgreSQL, Kafka, Zookeeper)
+- Google Cloud service account JSON for BigQuery (Optional)
 
 ### Quick Start
 
@@ -205,95 +172,11 @@ make seed-bq        # BigQuery (optional)
 # 5. Run pipeline (open 2 terminals)
 make run-live       # Terminal 1: Binance WebSocket → Kafka
 make run-spark      # Terminal 2: Spark Processing → Dual Sink
-
-# 6. Verify data
-make check-db       # Query PostgreSQL fact table
-make reconcile      # Compare Kafka vs BigQuery row counts
-```
-
-### All Make Targets
-
-| Category | Command | Description |
-|----------|---------|-------------|
-| **Setup** | `make install` | Install Python dependencies |
-| | `make setup-pg` | Create PostgreSQL Star Schema |
-| | `make setup-bq` | Create BigQuery dataset & tables |
-| | `make seed-pg` | Seed dimension tables (PostgreSQL) |
-| | `make seed-bq` | Seed dimension tables (BigQuery) |
-| **Infrastructure** | `make start-kafka` | Start Kafka + Zookeeper containers |
-| | `make stop-kafka` | Stop all containers |
-| | `make logs` | Tail Kafka container logs |
-| **Pipeline** | `make run-live` | Start Binance WebSocket producer |
-| | `make run-spark` | Start Spark processor (local) |
-| | `make run-spark-docker` | Start Spark processor (Docker) |
-| **Verification** | `make check-db` | Query PostgreSQL data |
-| | `make reconcile` | Compare Kafka vs BigQuery counts |
-| **Sync** | `make upload-bq` | Sync PostgreSQL data to BigQuery |
-| **Cleanup** | `make clean` | Remove caches and checkpoints |
-
----
-
-## Project Structure
-
-```
-├── producer/
-│   └── live_producer.py          # Binance WebSocket → Kafka (ingestion only)
-├── processor/
-│   └── spark_processor.py        # Spark 7-step processing engine (dual sink)
-├── warehouse/
-│   ├── postgres_schema.py        # PostgreSQL DDL (Kimball Star Schema)
-│   ├── bigquery_schema.py        # BigQuery DDL (Kimball Star Schema)
-│   ├── seed_dimensions_pg.py     # Seed dim tables to PostgreSQL
-│   └── seed_dimensions_bq.py     # Seed dim tables to BigQuery
-├── scripts/
-│   ├── migrate_to_kimball_sk.py  # One-time migration: VARCHAR PK → INTEGER SK
-│   ├── check_pg_data.py          # Query PostgreSQL for verification
-│   └── pg_to_bq_sync.py         # Sync PostgreSQL → BigQuery
-├── docker-compose.yml            # Kafka, Zookeeper, PostgreSQL, Spark
-├── Dockerfile.spark              # Spark container configuration
-├── Makefile                      # All project commands
-├── requirements.txt              # Python dependencies
-└── .env                          # Environment configuration
 ```
 
 ---
 
-## Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| **Winutils/Hadoop error on Windows** | Ensure `C:\hadoop\bin\winutils.exe` exists. Spark auto-configures the path. |
-| **ConnectionReset / Hostname binding** | Windows DNS issue. `spark_processor.py` binds to `SPARK_LOCAL_IP=127.0.0.1`. |
-| **Kafka connection timeout** | Kafka needs ~10s after start. Run `make logs` to check status. |
-| **BigQuery upload error** | Verify `GOOGLE_APPLICATION_CREDENTIALS` path in `.env`. Failed uploads saved to DLQ. |
-| **Py4J NullPointerException** | `spark.driver.host` and `spark.driver.bindAddress` are set to `127.0.0.1`. |
-
----
-
-## Hệ thống Tự động Đánh giá (Code & Data Reviewer Agent)
-
-Dự án tích hợp một luồng đánh giá tự động (Review Sub Agent) để đảm bảo chất lượng mã nguồn và dữ liệu luôn đạt chuẩn doanh nghiệp trước khi tích hợp. Quy trình đánh giá bao gồm 3 bước nghiêm ngặt:
-
-1. **Phát hiện lỗi (Error Detection):**
-   - Kiểm tra vi phạm chuẩn Kimball (Ví dụ: dùng VARCHAR làm khóa ngoại ở bảng Fact).
-   - Đảm bảo Data Pipeline tuân thủ việc băm mã `transaction_id` bằng SHA-256.
-   - Bắt các lỗi cú pháp Python, nguy cơ rò rỉ bộ nhớ hoặc vòng lặp vô tận.
-
-2. **Kiểm định chất lượng (Quality Verification):**
-   - Kiểm tra cấu hình Watermark (15 phút) trong Spark để xử lý dữ liệu trễ.
-   - Xác minh cơ chế UPSERT (`ON CONFLICT`) của PostgreSQL đã được triển khai để chống trùng lặp.
-   - Đảm bảo BigQuery Schema khớp 100% với cấu trúc PostgreSQL.
-
-3. **Tối ưu cuối cùng (Final Polished Output):**
-   - Refactor mã nguồn để loại bỏ code thừa, đảm bảo tính tối ưu và đẹp mắt.
-   - Cung cấp docstring và comment rõ ràng, giải thích tường minh để dễ dàng đưa vào Báo cáo Khóa luận.
-   - Chỉ xuất ra phiên bản "Sẵn sàng bàn giao" (Ready for Delivery) khi đạt chất lượng tuyệt đối.
-
-*Nguyên tắc:* Luôn đóng vai trò Strict Reviewer. Bất kỳ nội dung nào vi phạm chuẩn mực của dự án sẽ bị từ chối (Reject) ngay lập tức và yêu cầu làm lại cho đến khi đạt chuẩn.
-
----
-
-## Tech Stack
+## 🛠 Tech Stack
 
 | Technology | Version | Purpose |
 |------------|---------|---------|
@@ -301,10 +184,8 @@ Dự án tích hợp một luồng đánh giá tự động (Review Sub Agent) �
 | Apache Kafka | Confluent 7.5.0 | Message broker |
 | Apache Spark | 3.5.0 | Stream processing engine |
 | PostgreSQL | 15 | Primary data warehouse |
-| Google BigQuery | — | Backup data warehouse |
+| Google BigQuery| — | Backup data warehouse |
 | Power BI | — | Visualization layer |
 | Docker | — | Container orchestration |
-
----
 
 *This project is part of a graduation thesis — Real-time Crypto Data Pipeline with Kimball Star Schema.*

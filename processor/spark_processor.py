@@ -15,7 +15,7 @@ PROCESSING LAYER — Spark Structured Streaming as the central brain:
      a. [PRIMARY]  PostgreSQL  (UPSERT via psycopg2, real-time)
      b. [BACKUP]   BigQuery    (Parquet Load Job, async + DLQ on failure)
   Stage 4: VISUALIZATION : PowerBI (Connect to BigQuery)
-Output schema matches: fact_binance_trades (BigQuery & PostgreSQL)
+Output schema matches: fact_binance_trades_v2 (BigQuery & PostgreSQL)
 """
 
 import os
@@ -65,7 +65,7 @@ PG_PASSWORD = os.getenv("POSTGRES_PASSWORD", "paysim123")
 # BigQuery (Backup Sink)
 BQ_PROJECT_ID = os.getenv("BQ_PROJECT_ID", "")
 BQ_DATASET    = os.getenv("BQ_DATASET", "paysim_dw")
-BQ_TABLE_FACT = "fact_binance_trades"
+BQ_TABLE_FACT = "fact_binance_trades_v2"
 GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 
 if GOOGLE_APPLICATION_CREDENTIALS and not os.path.isabs(GOOGLE_APPLICATION_CREDENTIALS):
@@ -425,15 +425,20 @@ def write_to_postgres(rows: list, batch_id: int, row_count: int):
     # --- Log Latency Metric ---
     try:
         lat_conn = pool.getconn()
-        with lat_conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO fact_pipeline_latency (batch_id, sink_name, row_count, latency_ms) VALUES (%s, %s, %s, %s)",
-                (batch_id, 'PostgreSQL', row_count, elapsed)
-            )
-        lat_conn.commit()
-        pool.putconn(lat_conn)
+        try:
+            with lat_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO fact_pipeline_latency (batch_id, sink_name, row_count, latency_ms) VALUES (%s, %s, %s, %s)",
+                    (batch_id, 'PostgreSQL', row_count, elapsed)
+                )
+            lat_conn.commit()
+        except Exception as inner_e:
+            lat_conn.rollback()
+            logger.warning(f"[Batch {batch_id}] Failed to log PG latency: {inner_e}")
+        finally:
+            pool.putconn(lat_conn)
     except Exception as e:
-        logger.warning(f"[Batch {batch_id}] Failed to log PG latency: {e}")
+        logger.warning(f"[Batch {batch_id}] Failed to get PG connection for latency log: {e}")
 
 
 # =====================================================================
@@ -505,15 +510,20 @@ def _bq_async_upload(rows_dicts: list, batch_id: int, row_count: int):
         try:
             pool = _get_pg_pool()
             lat_conn = pool.getconn()
-            with lat_conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO fact_pipeline_latency (batch_id, sink_name, row_count, latency_ms) VALUES (%s, %s, %s, %s)",
-                    (batch_id, 'BigQuery', row_count, elapsed)
-                )
-            lat_conn.commit()
-            pool.putconn(lat_conn)
+            try:
+                with lat_conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO fact_pipeline_latency (batch_id, sink_name, row_count, latency_ms) VALUES (%s, %s, %s, %s)",
+                        (batch_id, 'BigQuery', row_count, elapsed)
+                    )
+                lat_conn.commit()
+            except Exception as inner_e:
+                lat_conn.rollback()
+                logger.warning(f"[Batch {batch_id}] Failed to log BQ latency: {inner_e}")
+            finally:
+                pool.putconn(lat_conn)
         except Exception as e:
-            logger.warning(f"[Batch {batch_id}] Failed to log BQ latency: {e}")
+            logger.warning(f"[Batch {batch_id}] Failed to get PG connection for BQ latency log: {e}")
 
     except Exception as e:
         # ===============================================================
