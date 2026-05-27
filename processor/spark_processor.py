@@ -580,11 +580,16 @@ def dual_sink_batch(batch_df: DataFrame, batch_id: int):
 
         enriched_df = (
             batch_df
-            # 1. Z-Score Deviation (Volume Outlier)
+            # Add batch_count to check if sample size is sufficient (N > 10)
+            .withColumn("batch_count", count("trade_id").over(w_symbol))
+            
+            # 1. Z-Score Deviation (Volume Outlier) - Only calculated if count > 10, otherwise 0.0
             .withColumn("batch_mean_usd", avg("amount_usd").over(w_symbol))
             .withColumn("batch_std_usd", coalesce(stddev("amount_usd").over(w_symbol), lit(1.0)))
             .withColumn("batch_std_usd", when(col("batch_std_usd") == 0, lit(1.0)).otherwise(col("batch_std_usd")))
-            .withColumn("z_score", (col("amount_usd") - col("batch_mean_usd")) / col("batch_std_usd"))
+            .withColumn("z_score", when(col("batch_count") > 10, 
+                                        (col("amount_usd") - col("batch_mean_usd")) / col("batch_std_usd"))
+                                   .otherwise(lit(0.0)))
             
             # 2. Price Slippage / Market Impact (VWAP deviation)
             .withColumn("batch_avg_price", avg("price").over(w_symbol))
@@ -593,17 +598,23 @@ def dual_sink_batch(batch_df: DataFrame, batch_id: int):
             # 3. Wash Trade Clustering (High-frequency sameness)
             .withColumn("wash_cluster_size", count("trade_id").over(w_wash))
             
-            # Evaluate Business Rules
+            # Evaluate Business Rules (Hybrid: Static + Dynamic)
             .withColumn("is_anomaly", when(
-                (col("z_score") > 3.0) |                                                      # Rule 1: Z-Score Outlier
-                (col("wash_cluster_size") >= 4) |                                             # Rule 2: Wash Trade Bot
-                ((col("price_dev_pct") > 0.01) & (col("amount_usd") > col("batch_mean_usd"))),  # Rule 3: Price Slippage
+                # --- STATIC RULES (Always checked, even in single-trade batches) ---
+                (col("amount_usd") >= 1000000) |                                                   # Static Rule 1: Whale Alert (Whale Alert standard)
+                (col("amount_usd") < 0.01) |                                                       # Static Rule 2: Dust/Wash Trade (Chainalysis standard)
+                
+                # --- DYNAMIC RULES (Only checked if sample size N > 10 is statistically significant) ---
+                ((col("batch_count") > 10) & (col("z_score") > 3.0)) |                             # Dynamic Rule 1: Z-Score Outlier
+                (col("wash_cluster_size") >= 4) |                                                  # Dynamic Rule 2: Wash Trade Bot (High-frequency)
+                ((col("batch_count") > 10) & (col("price_dev_pct") > 0.01) & (col("amount_usd") > col("batch_mean_usd"))), # Dynamic Rule 3: Price Slippage
                 lit(True)
             ).otherwise(lit(False)))
             
-            # Clean up memory (keep anomaly metrics for DB storage)
-            .drop("batch_mean_usd", "batch_std_usd", "batch_avg_price")
+            # Clean up memory (keep anomaly metrics for DB storage, drop temporary fields including batch_count)
+            .drop("batch_mean_usd", "batch_std_usd", "batch_avg_price", "batch_count")
         )
+        logger.info(f"[Batch {batch_id}] Dynamic anomaly detection applied (Z-Score, Wash Trade, Slippage)")
         rows = enriched_df.collect()
     except Exception as e:
         logger.error(f"[Batch {batch_id}] [ERROR] Dynamic anomaly detection failed, falling back: {e}")

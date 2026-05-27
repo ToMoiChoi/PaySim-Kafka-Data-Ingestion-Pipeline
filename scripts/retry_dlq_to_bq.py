@@ -24,7 +24,7 @@ def main():
     # 2. Get BigQuery configs
     BQ_PROJECT_ID = os.getenv("BQ_PROJECT_ID")
     BQ_DATASET    = os.getenv("BQ_DATASET", "paysim_dw")
-    BQ_TABLE_FACT = "fact_binance_trades"
+    BQ_TABLE_FACT = "fact_binance_trades_v2"
     GOOGLE_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 
     if not BQ_PROJECT_ID:
