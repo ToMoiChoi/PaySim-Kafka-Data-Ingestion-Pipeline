@@ -67,7 +67,7 @@ def create_kafka_producer() -> KafkaProducer:
     raise ConnectionError(f"[ERROR] Could not connect to Kafka after {MAX_RETRIES} attempts")
 
 
-# --- Main: Binance WebSocket -> Kafka (RAW DATA ONLY) -----------------
+# --- Main: Binance WebSocket -> Kafka (INGESTION LAYER - RAW DATA ONLY) ---
 
 def main():
     if hasattr(sys.stdout, 'reconfigure'):
@@ -107,37 +107,50 @@ def main():
 
     # 3. WebSocket callbacks
     def on_message(ws, message):
+        """
+        Callback xử lý tin nhắn thời gian thực từ Binance.
+        - Tiếp nhận chuỗi JSON văn bản (Text Frame).
+        - Thực hiện nguyên lý Single Responsibility Principle (SRP): 
+          Chỉ trích xuất các trường cơ bản và chuyển tiếp ngay sang Kafka,
+          hoàn toàn không thực hiện tính toán nặng hay ép kiểu tại đây để giữ băng thông lớn nhất.
+        """
         nonlocal count, error_count
         try:
-            data = json.loads(message)
+            # Chuyển đổi dữ liệu sang dạng Bytes để mô phỏng quá trình đọc luồng Bytes thô
+            if isinstance(message, str):
+                message_bytes = message.encode('utf-8')
+            else:
+                message_bytes = message
 
-            # Multi-stream format: {"stream": "btcusdt@trade", "data": {...}}
+            data = json.loads(message_bytes.decode('utf-8'))
+
+            # Định dạng Multi-stream của Binance: {"stream": "btcusdt@trade", "data": {...}}
             if "data" in data:
                 trade = data["data"]
             else:
                 trade = data
 
-            # Only process trade events
+            # Chỉ lọc và xử lý các sự kiện khớp lệnh thành công (trade events)
             if trade.get("e") != "trade":
                 return
 
             # ===================================================================
-            # RAW DATA FORWARDING — No transformation, no business logic.
-            # We extract only the original Binance fields and forward them.
-            # Spark will handle: UUID, cleansing, classification, anomaly, etc.
+            # RAW DATA MAPPING — Giữ nguyên định dạng chuỗi (String) của Binance
+            # Không ép kiểu float/int tại đây để tránh gây bottleneck hiệu năng của Producer.
+            # Tác vụ ép kiểu và sinh khóa định danh sẽ được thực hiện ở tầng xử lý hạ nguồn (Spark).
             # ===================================================================
             raw_payload = {
-                "trade_id":        trade.get("t"),       # Binance original trade ID
-                "crypto_symbol":   trade.get("s"),       # Symbol (e.g. BTCUSDT)
-                "price":           trade.get("p"),       # Price as STRING from Binance
-                "quantity":        trade.get("q"),       # Quantity as STRING from Binance
-                "trade_time_ms":   trade.get("T"),       # Trade time in epoch milliseconds
-                "is_buyer_maker":  trade.get("m"),       # True = Sell side, False = Buy side
-                "buyer_order_id":  trade.get("b"),       # Buyer order ID
-                "seller_order_id": trade.get("a"),       # Seller order ID
+                "trade_id":        trade.get("t"),       # ID giao dịch gốc của Binance (Natural Key)
+                "crypto_symbol":   trade.get("s"),       # Ký hiệu cặp tiền (ví dụ: BTCUSDT)
+                "price":           trade.get("p"),       # Giá khớp lệnh dạng String từ Binance
+                "quantity":        trade.get("q"),       # Khối lượng khớp lệnh dạng String từ Binance
+                "trade_time_ms":   trade.get("T"),       # Thời gian khớp lệnh dạng epoch milliseconds
+                "is_buyer_maker":  trade.get("m"),       # Phe bán chủ động (True) hay phe mua chủ động (False)
+                "buyer_order_id":  trade.get("b"),       # ID lệnh mua
+                "seller_order_id": trade.get("a"),       # ID lệnh bán
             }
 
-            # Send raw data to Kafka
+            # Đẩy dữ liệu vào Kafka Topic. Thư viện sử dụng nén LZ4 để tối ưu hóa đường truyền mạng.
             producer.send(KAFKA_TOPIC, value=raw_payload)
             count += 1
 

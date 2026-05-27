@@ -158,8 +158,9 @@ def process_raw_to_fact(spark: SparkSession, raw_df: DataFrame) -> DataFrame:
     """
 
     # -----------------------------------------------------------------
-    # Step 1: TYPE CASTING — Convert raw strings to proper numeric types
-    # Binance sends price and quantity as strings (e.g., "87234.50")
+    # Step 1: SCHEMA ENFORCEMENT & TYPE CASTING (Ràng buộc lược đồ dữ liệu)
+    # Chuyển đổi định dạng Price/Quantity từ chuỗi String của Binance sang Double
+    # Quy đổi epoch time (milliseconds) sang định dạng Timestamp chuẩn SQL.
     # -----------------------------------------------------------------
     typed_df = (
         raw_df
@@ -170,15 +171,12 @@ def process_raw_to_fact(spark: SparkSession, raw_df: DataFrame) -> DataFrame:
             expr("to_timestamp(trade_time_ms / 1000)")
         )
     )
-    logger.info("[PROCESSING] Step 1: Type casting completed (strings -> numeric)")
+    logger.info("[PROCESSING] Step 1: Schema enforcement & type casting completed")
 
     # -----------------------------------------------------------------
-    # Step 2: DATA CLEANSING — Remove garbage/invalid records
-    # Invalid conditions:
-    #   - price <= 0 or price IS NULL
-    #   - quantity <= 0 or quantity IS NULL
-    #   - trade_id IS NULL
-    #   - crypto_symbol IS NULL or empty
+    # Step 2: DATA QUALITY GUARD (Làm sạch và kiểm soát chất lượng dữ liệu)
+    # Loại bỏ các bản ghi nhiễu, lỗi mạng, giá trị trống (Null/NaN/Negative)
+    # Đảm bảo tính toàn vẹn dữ liệu đầu vào trước khi thực hiện phân tích sâu.
     # -----------------------------------------------------------------
     clean_df = (
         typed_df
@@ -188,106 +186,67 @@ def process_raw_to_fact(spark: SparkSession, raw_df: DataFrame) -> DataFrame:
         .filter(col("quantity").isNotNull() & (col("quantity") > 0))
         .filter(col("trade_time").isNotNull())
     )
-    logger.info("[PROCESSING] Step 2: Data cleansing completed (filtered invalid records)")
+    logger.info("[PROCESSING] Step 2: Data cleansing (Data Quality Guard) completed")
 
     # -----------------------------------------------------------------
-    # Step 3: DEDUPLICATION — Two-Layer Strategy
-    #
-    # Problem: Binance WebSocket may replay old trades when reconnecting.
-    #          If the server is down for >N minutes, Spark's watermark-
-    #          based dedup alone will miss late-arriving duplicates
-    #          because the state has already been purged.
-    #
-    # Solution: TWO-LAYER DEDUPLICATION
-    #
-    # LAYER 1 (Real-time, in Spark):
-    #   - Generate deterministic transaction_id from symbol and trade_id
-    #     → (e.g. BTCUSDT_12345).
-    #   - Watermark window = 30 seconds (covers most reconnect scenarios).
-    #   - dropDuplicates on transaction_id within the watermark window.
-    #   - Handles ~95% of duplicates in real-time at the streaming level.
-    #
-    # LAYER 2 (Storage-level, guaranteed):
-    #   - PostgreSQL: INSERT ... ON CONFLICT (transaction_id) DO UPDATE
-    #     → Even if a duplicate passes Layer 1 (arrives after 30 seconds),
-    #       PostgreSQL's UNIQUE constraint catches it at write time.
-    #   - BigQuery: Uses Load Job with WRITE_APPEND. Periodic dedup can
-    #     be done via scheduled query if needed.
-    #
-    # This two-layer approach ensures ZERO DUPLICATES in the final
-    # data warehouse regardless of how long the server is down.
+    # Step 3: DEDUPLICATION LAYER 1 (Khử trùng lặp đa tầng - Spark Stateful)
+    # Sử dụng khóa ghép định danh tự nhiên transaction_id (Symbol + TradeID)
+    # Áp dụng cơ chế Watermark 30 giây để kiểm soát dữ liệu trễ trong RAM (State Store)
+    # Kết hợp dropDuplicates nhằm loại bỏ các thông điệp bị gửi lặp lại.
     # -----------------------------------------------------------------
-
-    # Generate deterministic transaction_id (crypto_symbol + "_" + trade_id)
     dedup_df = (
         clean_df
         .withColumn(
             "transaction_id",
             concat_ws("_", col("crypto_symbol"), col("trade_id").cast("string"))
         )
-        # Layer 1: Spark stateful dedup with 30-second watermark
-        # 30 seconds covers typical WebSocket reconnect delays.
-        # For delays exceeding 30 seconds, Layer 2 (PostgreSQL UPSERT
-        # ON CONFLICT) guarantees no duplicates reach the warehouse.
         .withWatermark("trade_time", "30 seconds")
         .dropDuplicates(["transaction_id"])
     )
-    logger.info("[PROCESSING] Step 3: Deduplication Layer 1 completed (Symbol_TradeID + 30sec watermark)")
+    logger.info("[PROCESSING] Step 3: Deduplication Layer 1 (Stateful Spark) completed")
 
     # -----------------------------------------------------------------
-    # Step 4: TRANSFORMATION — Derive computed columns
-    # Calculate the total trade value in USD
+    # Step 4: DATA ENRICHMENT & TRANSFORMATION (Làm giàu và biến đổi dữ liệu)
+    # Tính toán chỉ số nghiệp vụ phát sinh: Tổng giá trị giao dịch bằng USD (amount_usd)
     # -----------------------------------------------------------------
     transform_df = dedup_df.withColumn(
         "amount_usd",
         spark_round(col("price") * col("quantity"), 2)
     )
-    logger.info("[PROCESSING] Step 4: Transformation completed (amount_usd calculated)")
+    logger.info("[PROCESSING] Step 4: Transformation (amount_usd computation) completed")
 
     # -----------------------------------------------------------------
-    # Step 5: VOLUME CATEGORIZATION — Kimball Surrogate Key Lookup
-    # Based on Chainalysis and Whale Alert real-world thresholds:
-    #   SK=1: < $10,000           → RETAIL       (small individual trades)
-    #   SK=2: $10,000 – $100,000  → PROFESSIONAL (experienced traders)
-    #   SK=3: $100,000 – $1M      → INSTITUTIONAL (block trades)
-    #   SK=4: ≥ $1,000,000        → WHALE        (market-moving orders)
-    #
-    # Kimball: Fact table stores INTEGER surrogate key, NOT varchar.
-    # The volume_category_key maps to dim_volume_category.volume_category_key.
+    # Step 5: VOLUME CATEGORIZATION (Kimball Surrogate Key Mapping - Phân loại volume)
+    # Phân hạng quy mô giao dịch theo các ngưỡng chuẩn ngành (Retail -> Whale)
+    # Ánh xạ kết quả sang Khóa thay thế (Surrogate Key) từ 1 đến 4 thay vì lưu chuỗi text
+    # Nhằm tối ưu hóa hiệu năng lưu trữ và đẩy nhanh tốc độ truy vấn JOIN.
     # -----------------------------------------------------------------
     categorized_df = transform_df.withColumn(
         "volume_category_key",
-        when(col("amount_usd") >= 1_000_000, lit(4))   # WHALE
-        .when(col("amount_usd") >= 100_000,  lit(3))   # INSTITUTIONAL
-        .when(col("amount_usd") >= 10_000,   lit(2))   # PROFESSIONAL
-        .otherwise(lit(1))                              # RETAIL
+        when(col("amount_usd") >= 1_000_000, lit(4))   # Khóa 4: WHALE (Cá voi - Giao dịch lớn)
+        .when(col("amount_usd") >= 100_000,  lit(3))   # Khóa 3: INSTITUTIONAL (Tổ chức)
+        .when(col("amount_usd") >= 10_000,   lit(2))   # Khóa 2: PROFESSIONAL (Chuyên nghiệp)
+        .otherwise(lit(1))                              # Khóa 1: RETAIL (Nhỏ lẻ)
     )
-    logger.info("[PROCESSING] Step 5: Volume categorization completed (Surrogate Keys 1-4)")
+    logger.info("[PROCESSING] Step 5: Volume categorization & Surrogate Key mapping completed")
 
     # -----------------------------------------------------------------
     # Step 6: ANOMALY DETECTION — Shifted to Micro-Batch
-    # 
-    # Static Anomaly rules have been replaced by Dynamic Statistical
-    # Models (Z-Score, Wash Trade Heuristics, Slippage).
-    # Because PySpark does not allow non-time-based Window functions 
-    # on streaming DFs, the actual advanced calculations are deferred 
-    # and executed inside the `foreachBatch` orchestrator.
-    # Here we just pre-allocate the column to preserve schema integrity.
+    # Áp dụng bộ khung lý thuyết từ Chandola và các cộng sự (2009):
+    # Phát hiện 3 loại bất thường (Point, Contextual, Collective Anomalies)
+    # bằng phương pháp thống kê động (Statistical-based).
+    # Do Spark Structured Streaming không cho phép tính toán hàm Window phi thời gian
+    # trực tiếp trên DataFrame luồng, logic này được dời vào hàm foreachBatch
+    # (xử lý trên DataFrame lô tĩnh). Tại đây chỉ khai báo cột để giữ cấu trúc.
     # -----------------------------------------------------------------
     anomaly_df = categorized_df.withColumn("is_anomaly", lit(False))
-    logger.info("[PROCESSING] Step 6: Pre-allocation for dynamic Anomaly Detection completed")
+    logger.info("[PROCESSING] Step 6: Pre-allocation for dynamic Anomaly Detection (Chandola et al., 2009) completed")
 
     # -----------------------------------------------------------------
-    # Step 7: STAR SCHEMA KEY GENERATION — All Surrogate Keys
-    # Generate ALL surrogate keys for joining with Dimension tables:
-    #   - date_key:             Smart Key yyyyMMdd (dim_date)
-    #   - time_key:             Smart Key HHmm (dim_time)
-    #   - crypto_pair_key:      Surrogate Key 1-5 (dim_crypto_pair)
-    #   - volume_category_key:  Already generated in Step 5 (1-4)
+    # Step 7: DIMENSIONAL MODELING SURROGATE KEYS (Tạo các khóa chiều Star Schema)
+    # Sinh các khóa thời gian (date_key, time_key) dưới dạng số nguyên thông minh (Smart Keys)
+    # Ánh xạ crypto_symbol (Natural Key) sang crypto_pair_key (Surrogate Key 1-5)
     # -----------------------------------------------------------------
-
-    # Kimball: Map crypto_symbol (natural key) → crypto_pair_key (surrogate)
-    # This mapping matches exactly what seed_dimensions scripts populate.
     crypto_sk_map = create_map(
         lit("BTCUSDT"), lit(1),
         lit("ETHUSDT"), lit(2),
@@ -303,25 +262,19 @@ def process_raw_to_fact(spark: SparkSession, raw_df: DataFrame) -> DataFrame:
             when(col("trade_time").isNull(), current_timestamp())
             .otherwise(col("trade_time"))
         )
-        # date_key: yyyyMMdd format (e.g., 20260414)
         .withColumn("date_key", date_format(col("trade_time"), "yyyyMMdd").cast("long"))
-        # time_key: HHmm format (e.g., 14:30 -> 1430)
         .withColumn("time_key", (expr("hour(trade_time)") * 100 + expr("minute(trade_time)")).cast("long"))
-        # crypto_pair_key: Surrogate Key lookup from natural key
         .withColumn("crypto_pair_key", crypto_sk_map[col("crypto_symbol")].cast("int"))
-        # Cast to match fact_binance_trades schema exactly
         .withColumn("price",      col("price").cast("decimal(38,9)"))
         .withColumn("quantity",   col("quantity").cast("decimal(38,9)"))
         .withColumn("amount_usd", col("amount_usd").cast("decimal(38,9)"))
     )
-    logger.info("[PROCESSING] Step 7: Star Schema surrogate keys generated")
+    logger.info("[PROCESSING] Step 7: Star Schema surrogate keys alignment completed")
 
     # -----------------------------------------------------------------
-    # Final SELECT — Kimball-compliant fact_binance_trades schema
-    # All FK references are INTEGER surrogate keys, NOT varchar.
-    # Natural keys (crypto_symbol, volume_category) are NOT stored
-    # in the fact table — they live only in Dimension tables.
-    # transaction_id is a Degenerate Dimension (no separate dim table).
+    # Final SELECT — Cấu trúc dữ liệu chuẩn Fact Table (Kimball Fact Schema)
+    # Chỉ lưu trữ Khóa thay thế (Surrogate Keys) và các Chỉ số đo lường (Metrics).
+    # Không lưu trữ thông tin văn bản thô (Natural Keys) ngoại trừ Degenerate Dimension (transaction_id).
     # -----------------------------------------------------------------
     fact_df = final_df.select(
         "transaction_id", "trade_id",
@@ -348,11 +301,15 @@ PG_POOL_LOCK = threading.Lock()
 
 
 def _get_pg_pool():
-    """Lazy-init PostgreSQL connection pool (thread-safe singleton)."""
+    """
+    Khởi tạo PostgreSQL Connection Pool theo mẫu thiết kế Singleton (Thread-Safe).
+    - Tạo sẵn từ 1 đến 5 kết nối tồn tại lâu dài (Persistent Connections).
+    - Triệt tiêu hoàn toàn chi phí bắt tay TCP Handshake (~50-100ms) ở mỗi micro-batch.
+    """
     global PG_POOL
     if PG_POOL is None:
         with PG_POOL_LOCK:
-            if PG_POOL is None:  # Double-check after acquiring lock
+            if PG_POOL is None:  # Double-check sau khi acquire lock
                 PG_POOL = psycopg2.pool.SimpleConnectionPool(
                     minconn=1,
                     maxconn=5,
@@ -364,9 +321,14 @@ def _get_pg_pool():
 
 
 def write_to_postgres(rows: list, batch_id: int, row_count: int):
-    """Write batch to PostgreSQL using psycopg2 execute_values (FAST UPSERT).
-    Kimball-compliant: All FK references are INTEGER surrogate keys.
-    Uses connection pooling to eliminate per-batch connection overhead."""
+    """
+    Ghi dữ liệu micro-batch vào PostgreSQL sử dụng cơ chế Fast UPSERT (psycopg2 execute_values).
+    - Tuân thủ chuẩn thiết kế Kimball: Các khóa ngoại tham chiếu đều là số nguyên (Surrogate Keys).
+    - Sử dụng Connection Pool để lấy và trả kết nối nhanh chóng.
+    - Cơ chế UPSERT (ON CONFLICT DO UPDATE):
+      Đóng vai trò là chốt chặn khử trùng lặp lớp thứ 2 ở mức lưu trữ (Storage Deduplication Layer).
+      Ngăn ngừa tuyệt đối trùng lặp dữ liệu ngay cả khi sự kiện trễ trôi ra ngoài cửa sổ Watermark của Spark.
+    """
     t0 = time.time()
 
     cols = [
@@ -422,7 +384,7 @@ def write_to_postgres(rows: list, batch_id: int, row_count: int):
         f"rows={row_count:,} | latency={elapsed}ms"
     )
 
-    # --- Log Latency Metric ---
+    # --- Log chỉ số độ trễ ghi (Latency Metrics) phục vụ giám sát hiệu năng ---
     try:
         lat_conn = pool.getconn()
         try:
@@ -448,18 +410,20 @@ def write_to_postgres(rows: list, batch_id: int, row_count: int):
 BQ_BUFFER = []
 BQ_BUFFER_LOCK = threading.Lock()
 LAST_BQ_UPLOAD_TIME = time.time()
-BQ_UPLOAD_INTERVAL_SEC = 10   # Upload to BQ every 10 seconds
-BQ_UPLOAD_ROWS_LIMIT   = 5000 # Or when buffer reaches 5000 rows
+BQ_UPLOAD_INTERVAL_SEC = 10   # Khoảng thời gian flush đệm lên BigQuery (10 giây)
+BQ_UPLOAD_ROWS_LIMIT   = 5000 # Kích thước đệm tối đa trước khi tự động đẩy (5000 bản ghi)
 
 
 def _bq_async_upload(rows_dicts: list, batch_id: int, row_count: int):
     """
-    Async BigQuery upload with Dead-Letter Queue (DLQ) fault tolerance.
-
-    If upload fails for ANY reason (network, rate limit, auth, etc.),
-    the Parquet file is moved to the DLQ directory instead of being
-    deleted. This ensures ZERO DATA LOSS — failed batches can be
-    retried later manually or by an automated recovery script.
+    Ghi dữ liệu bất đồng bộ lên BigQuery sử dụng định dạng nén Parquet và cơ chế đệm.
+    - Lưu tạm thời dữ liệu của micro-batch thành tệp Parquet cục bộ (nén dạng cột PyArrow).
+    - Gọi BigQuery Load Job đẩy tệp Parquet trực tiếp (tối ưu hóa tần suất API và giảm chi phí Cloud GCP).
+    - Tích hợp Dead-Letter Queue (DLQ):
+      Nếu quá trình tải lên thất bại do mạng ngoại vi hoặc lỗi xác thực xác quyền,
+      file Parquet sẽ được di chuyển sang thư mục cách ly lỗi `dlq_bq_failed`
+      để phục vụ khôi phục thủ công bằng script `retry_dlq_to_bq.py` sau này,
+      đảm bảo tính chống thất thoát dữ liệu tuyệt đối (Fault Tolerance).
     """
     if not BQ_PROJECT_ID:
         return
@@ -568,46 +532,43 @@ def dual_sink_batch(batch_df: DataFrame, batch_id: int):
     global LAST_BQ_UPLOAD_TIME
     t_start = time.time()
 
-    # --- ADVANCED DYNAMIC ANOMALY DETECTION ---
-    # Because batch_df is a static DataFrame, we can use non-time-based Window functions safely.
+    # --- ADVANCED DYNAMIC ANOMALY DETECTION (Chandola et al., 2009 Taxonomy) ---
+    # Sử dụng phương pháp Statistical-based (Dựa trên thống kê) trên micro-batch tĩnh
     try:
         from pyspark.sql.window import Window
         from pyspark.sql.functions import avg, stddev, count, abs as spark_abs, coalesce, col, when, lit
         
         w_symbol = Window.partitionBy("crypto_pair_key")
-        # Wash trade cluster logic ignores buyer/maker for simplicity of volume detection
         w_wash = Window.partitionBy("crypto_pair_key", "trade_time")
 
         enriched_df = (
             batch_df
-            # Add batch_count to check if sample size is sufficient (N > 10)
             .withColumn("batch_count", count("trade_id").over(w_symbol))
             
-            # 1. Z-Score Deviation (Volume Outlier) - Only calculated if count > 10, otherwise 0.0
+            # 1. Z-Score Deviation (Volume Outlier - Point Anomaly)
             .withColumn("batch_mean_usd", avg("amount_usd").over(w_symbol))
             .withColumn("batch_std_usd", coalesce(stddev("amount_usd").over(w_symbol), lit(1.0)))
             .withColumn("batch_std_usd", when(col("batch_std_usd") == 0, lit(1.0)).otherwise(col("batch_std_usd")))
             .withColumn("z_score", when(col("batch_count") > 10, 
-                                        (col("amount_usd") - col("batch_mean_usd")) / col("batch_std_usd"))
+                                         (col("amount_usd") - col("batch_mean_usd")) / col("batch_std_usd"))
                                    .otherwise(lit(0.0)))
-            
-            # 2. Price Slippage / Market Impact (VWAP deviation)
+            # 2. Price Slippage / Market Impact (Contextual Anomaly)
             .withColumn("batch_avg_price", avg("price").over(w_symbol))
             .withColumn("price_dev_pct", spark_abs(col("price") - col("batch_avg_price")) / col("batch_avg_price"))
-            
-            # 3. Wash Trade Clustering (High-frequency sameness)
+            # 3. Wash Trade Clustering (Collective Anomaly)
             .withColumn("wash_cluster_size", count("trade_id").over(w_wash))
-            
-            # Evaluate Business Rules (Hybrid: Static + Dynamic)
+            # Gắn cờ Anomaly theo các giả định phân phối dữ liệu từ Chandola (2009)
             .withColumn("is_anomaly", when(
-                # --- STATIC RULES (Always checked, even in single-trade batches) ---
-                (col("amount_usd") >= 1000000) |                                                   # Static Rule 1: Whale Alert (Whale Alert standard)
-                (col("amount_usd") < 0.01) |                                                       # Static Rule 2: Dust/Wash Trade (Chainalysis standard)
+                # --- NHÓM 1: POINT ANOMALIES (Bất thường điểm đơn lẻ) ---
+                (col("amount_usd") >= 1000000) |                                                   # Whale Alert (> 1M USD)
+                (col("amount_usd") < 0.01) |                                                       # Dust Trade (< 0.01 USD)
+                ((col("batch_count") > 30) & (col("z_score") > 3.0)) |                             # Z-Score Outlier (3-Sigma)
                 
-                # --- DYNAMIC RULES (Only checked if sample size N > 10 is statistically significant) ---
-                ((col("batch_count") > 10) & (col("z_score") > 3.0)) |                             # Dynamic Rule 1: Z-Score Outlier
-                (col("wash_cluster_size") >= 4) |                                                  # Dynamic Rule 2: Wash Trade Bot (High-frequency)
-                ((col("batch_count") > 10) & (col("price_dev_pct") > 0.01) & (col("amount_usd") > col("batch_mean_usd"))), # Dynamic Rule 3: Price Slippage
+                # --- NHÓM 2: COLLECTIVE ANOMALIES (Bất thường nhóm/tập hợp) ---
+                (col("wash_cluster_size") >= 4) |                                                  # Bot Wash Trade (Hành vi tần suất cao)
+                
+                # --- NHÓM 3: CONTEXTUAL ANOMALIES (Bất thường ngữ cảnh trượt giá) ---
+                ((col("batch_count") > 30) & (col("price_dev_pct") > 0.01) & (col("amount_usd") > col("batch_mean_usd"))), # Trượt giá lớn đi kèm khối lượng cao trong micro-batch
                 lit(True)
             ).otherwise(lit(False)))
             

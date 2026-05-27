@@ -1,3 +1,13 @@
+"""
+Retry DLQ to BigQuery - Fault-Tolerance & Self-Healing Pipeline Script
+====================================================================
+Tầng khôi phục lỗi (Fault-Tolerance Recovery Layer):
+- Thực hiện cơ chế Tự chữa lành (Self-Healing) cho hệ thống phân tán.
+- Quét các tệp tin nén Parquet bị gián đoạn (do mất mạng, hết hạn ngạch API...) trong thư mục cách ly lỗi BQ_DLQ_DIR.
+- Tải bù tệp dữ liệu lên Google BigQuery để khôi phục tính nhất quán hoàn toàn của Data Warehouse.
+- Di chuyển tệp thành công vào thư mục lưu trữ dlq_bq_success để đối soát và giải phóng bộ đệm.
+"""
+
 import os
 import glob
 import shutil
@@ -11,7 +21,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-logger = logging.getLogger("RetryDLQ")
+logger = logging.getLogger("RetryDLQ_SelfHealing")
 
 def main():
     # 1. Setup paths
@@ -68,26 +78,28 @@ def main():
         schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
     )
 
-    # 5. Process each file
+    # 5. Khởi động quy trình khôi phục dữ liệu tuần tự
     success_count = 0
     for file_path in parquet_files:
         filename = os.path.basename(file_path)
         logger.info(f"Uploading {filename} to BigQuery...")
         
         try:
+            # Đọc tệp Parquet dạng nhị phân và gửi qua cơ chế Load Job
             with open(file_path, "rb") as source_file:
                 job = client.load_table_from_file(source_file, table_id, job_config=job_config)
-                job.result()  # Wait for the job to complete
+                job.result()  # Đợi tiến trình API BigQuery phản hồi hoàn tất (blocking call)
                 
             logger.info(f"[SUCCESS] {filename} uploaded successfully.")
             
-            # Move to success folder so we don't process it again
+            # Sau khi đẩy thành công, di chuyển tệp vào thư mục lưu trữ (Archiving/Success)
+            # Nhằm giải phóng bộ nhớ đệm và phục vụ công tác đối soát dữ liệu (Reconciliation)
             dest_path = os.path.join(SUCCESS_DIR, filename)
             shutil.move(file_path, dest_path)
             success_count += 1
             
         except Exception as e:
-            logger.error(f"[ERROR] Failed to upload {filename}: {e}")
+            logger.error(f"[ERROR] Failed to upload {filename} to BigQuery during retry: {e}")
 
     logger.info("=" * 50)
     logger.info(f"DLQ Retry Summary: {success_count}/{len(parquet_files)} files successfully uploaded.")
